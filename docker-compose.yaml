@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  database:
+    image: postgres:latest
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: .
+    container_name: nest-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - database
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+      - /app/node_modules
+    command: npm run start:dev
+
+volumes:
+  postgres_data:

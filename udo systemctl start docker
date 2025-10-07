@@ -1,0 +1,14 @@
+[0;1;31m×[0m docker.service - Docker Application Container Engine
+     Loaded: loaded (/lib/systemd/system/docker.service; enabled; vendor preset: enabled)
+     Active: [0;1;31mfailed[0m (Result: exit-code) since Tue 2025-10-07 10:13:37 UTC; 2min 36s ago
+TriggeredBy: [0;1;31m×[0m docker.socket
+       Docs: https://docs.docker.com
+    Process: 2344603 ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock [0;1;31m(code=exited, status=1/FAILURE)[0m
+   Main PID: 2344603 (code=exited, status=1/FAILURE)
+        CPU: 131ms
+
+Oct 07 10:13:37 a214110904.local systemd[1]: docker.service: Scheduled restart job, restart counter is at 3.
+Oct 07 10:13:37 a214110904.local systemd[1]: Stopped Docker Application Container Engine.
+Oct 07 10:13:37 a214110904.local systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mdocker.service: Start request repeated too quickly.[0m
+Oct 07 10:13:37 a214110904.local systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mdocker.service: Failed with result 'exit-code'.[0m
+Oct 07 10:13:37 a214110904.local systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start Docker Application Container Engine.[0m
