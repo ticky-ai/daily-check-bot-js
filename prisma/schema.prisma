@@ -1,0 +1,464 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum HabitFrequency {
+  DAILY
+  WEEKLY
+  CUSTOM
+}
+
+enum MoodType {
+  VERY_SAD
+  SAD
+  NEUTRAL
+  HAPPY
+  VERY_HAPPY
+}
+
+enum FocusSessionStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum ReminderType {
+  TASK
+  HABIT
+  GENERAL
+}
+
+enum SubscriptionType {
+  FREE
+  PREMIUM
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum ReminderStatus {
+  ACTIVE
+  SNOOZED
+  DISMISSED
+  COMPLETED
+}
+
+enum AchievementRarity {
+  COMMON
+  UNCOMMON
+  RARE
+  EPIC
+  LEGENDARY
+}
+
+model User {
+  id                String   @id @db.VarChar(50)
+  username          String?
+  firstName         String?  @map("first_name")
+  lastName          String?  @map("last_name")
+
+  // Settings
+  theme             String   @default("default")
+  notifications     Boolean  @default(true)
+  onboardingPassed  Boolean  @default(false) @map("onboarding_passed")
+  feedbackGiven     Boolean  @default(false) @map("feedback_given")
+  aiMode            Boolean  @default(true) @map("ai_mode")
+  dryMode           Boolean  @default(false) @map("dry_mode")
+  showAnimations    Boolean  @default(true) @map("show_animations")
+  voiceCommands     Boolean  @default(true) @map("voice_commands")
+  dailyReminders    Boolean  @default(true) @map("daily_reminders")
+  reminderTime      String   @default("09:00") @map("reminder_time")
+  weeklySummary     Boolean  @default(true) @map("weekly_summary")
+  privacyLevel      String   @default("public") @map("privacy_level")
+
+  // Stats
+  totalTasks        Int      @default(0) @map("total_tasks")
+  completedTasks    Int      @default(0) @map("completed_tasks")
+  totalHabits       Int      @default(0) @map("total_habits")
+  completedHabits   Int      @default(0) @map("completed_habits")
+  currentStreak     Int      @default(0) @map("current_streak")
+  maxStreak         Int      @default(0) @map("max_streak")
+  totalXp           Int      @default(0) @map("total_xp")
+  level             Int      @default(1)
+  todayTasks        Int      @default(0) @map("today_tasks")
+  todayHabits       Int      @default(0) @map("today_habits")
+  weekStreak        Int      @default(0) @map("week_streak")
+  monthStreak       Int      @default(0) @map("month_streak")
+  focusTimeTotal    Int      @default(0) @map("focus_time_total") // in minutes
+  referralsCount    Int      @default(0) @map("referrals_count")
+  activeReferrals   Int      @default(0) @map("active_referrals")
+  challengesWon     Int      @default(0) @map("challenges_won")
+  challengesParticipated Int @default(0) @map("challenges_participated")
+
+  // Customization
+  avatar                String   @default("default")
+  background            String   @default("default")
+  stickers              String[] @default([])
+  unlockedThemes        String[] @default(["default"]) @map("unlocked_themes")
+  unlockedAvatars       String[] @default(["default"]) @map("unlocked_avatars")
+  unlockedBackgrounds   String[] @default(["default"]) @map("unlocked_backgrounds")
+
+  // Referral system
+  referralCode      String?  @unique @map("referral_code")
+  referredBy        String?  @map("referred_by")
+  referredByUser    User?    @relation("UserReferrals", fields: [referredBy], references: [id])
+  referrals         User[]   @relation("UserReferrals")
+  referralBalance   Float    @default(0) @map("referral_balance") // in rubles
+
+  // Meta
+  lastActivity      DateTime? @map("last_activity")
+  timezone          String?
+  city              String?
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  // Billing & Subscription
+  subscriptionType    SubscriptionType @default(FREE) @map("subscription_type")
+  subscriptionStarted DateTime?        @map("subscription_started")
+  subscriptionEnds    DateTime?        @map("subscription_ends")
+  trialEnds           DateTime?        @map("trial_ends")
+  isTrialActive       Boolean          @default(true) @map("is_trial_active")
+  
+  // Premium subscription
+  isPremium           Boolean          @default(false) @map("is_premium")
+  
+  // Usage limits (daily)
+  dailyRemindersUsed  Int              @default(0) @map("daily_reminders_used")
+  dailyTasksUsed      Int              @default(0) @map("daily_tasks_used")
+  dailyHabitsUsed     Int              @default(0) @map("daily_habits_used")
+  dailyAiQueriesUsed  Int              @default(0) @map("daily_ai_queries_used")
+  dailyAiRequests     Int              @default(0) @map("daily_ai_requests")
+  dailyPomodoroSessions Int            @default(0) @map("daily_pomodoro_sessions")
+  lastUsageReset      DateTime?        @map("last_usage_reset")
+  lastDailyReset      DateTime?        @map("last_daily_reset")
+
+  // Relations
+  tasks             Task[]
+  habits            Habit[]
+  moods             MoodEntry[]
+  focusSessions     FocusSession[]
+  habitSkips        HabitSkip[]
+  reminders         Reminder[]
+  userAchievements  UserAchievement[]
+  payments          Payment[]
+  referrerPayouts   ReferralPayout[] @relation("ReferrerPayouts")
+  referredPayouts   ReferralPayout[] @relation("ReferredPayouts")
+  dependencySupport DependencySupport[]
+
+  @@map("users")
+}
+
+model Task {
+  id                String      @id @default(cuid())
+  userId            String      @map("user_id") @db.VarChar(50)
+  title             String
+  description       String?
+  status            TaskStatus  @default(PENDING)
+  priority          TaskPriority @default(MEDIUM)
+  dueDate           DateTime?   @map("due_date")
+  completedAt       DateTime?   @map("completed_at")
+  xpReward          Int         @default(0) @map("xp_reward")
+  category          String?
+  tags              String[]    @default([])
+  isRecurring       Boolean     @default(false) @map("is_recurring")
+  recurrencePattern String?     @map("recurrence_pattern")
+  estimatedDuration Int         @default(0) @map("estimated_duration") // in minutes
+  actualDuration    Int         @default(0) @map("actual_duration") // in minutes
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("tasks")
+}
+
+model Habit {
+  id                String         @id @default(cuid())
+  userId            String         @map("user_id") @db.VarChar(50)
+  title             String
+  description       String?
+  frequency         HabitFrequency @default(DAILY)
+  targetCount       Int            @default(1) @map("target_count")
+  currentStreak     Int            @default(0) @map("current_streak")
+  maxStreak         Int            @default(0) @map("max_streak")
+  totalCompletions  Int            @default(0) @map("total_completions")
+  xpReward          Int            @default(5) @map("xp_reward")
+  category          String?
+  tags              String[]       @default([])
+  isActive          Boolean        @default(true) @map("is_active")
+  reminderTime      String?        @map("reminder_time")
+  reminderDays      String[]       @default([]) @map("reminder_days")
+  icon              String?
+  color             String?
+  difficulty        Int            @default(0) // 1-5 scale
+  lastCompletedAt   DateTime?      @map("last_completed_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  // Relations
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  skips             HabitSkip[]
+
+  @@map("habits")
+}
+
+model MoodEntry {
+  id                String     @id @default(cuid())
+  userId            String     @map("user_id") @db.VarChar(50)
+  mood              MoodType
+  rating            Int        @default(5) // 1-10 scale
+  note              String?
+  emotions          String[]   @default([])
+  factors           String[]   @default([])
+  isPrivate         Boolean    @default(false) @map("is_private")
+  createdAt         DateTime   @default(now()) @map("created_at")
+
+  // Relations
+  user              User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("mood_entries")
+}
+
+model FocusSession {
+  id                   String              @id @default(cuid())
+  userId               String              @map("user_id") @db.VarChar(50)
+  title                String?
+  description          String?
+  plannedDuration      Int                 @default(25) @map("planned_duration") // in minutes
+  actualDuration       Int                 @default(0) @map("actual_duration") // in minutes
+  status               FocusSessionStatus  @default(ACTIVE)
+  startedAt            DateTime?           @map("started_at")
+  endedAt              DateTime?           @map("ended_at")
+  pausedAt             DateTime?           @map("paused_at")
+  totalPausedTime      Int                 @default(0) @map("total_paused_time") // in milliseconds
+  breaksTaken          Int                 @default(0) @map("breaks_taken")
+  breakDuration        Int                 @default(0) @map("break_duration") // total break time
+  category             String?
+  tags                 String[]            @default([])
+  notes                String?
+  productivityRating   Int                 @default(5) @map("productivity_rating") // 1-10 scale
+  xpReward             Int                 @default(10) @map("xp_reward")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+
+  // Relations
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("focus_sessions")
+}
+
+model HabitSkip {
+  id                   String              @id @default(cuid())
+  userId               String              @map("user_id") @db.VarChar(50)
+  habitId              String              @map("habit_id")
+  skipDate             DateTime            @map("skip_date") @db.Date
+  reason               String?             // Optional reason for skipping
+  createdAt            DateTime            @default(now()) @map("created_at")
+
+  // Relations
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  habit                Habit               @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  // Ensure one skip per habit per day
+  @@unique([userId, habitId, skipDate])
+  @@map("habit_skips")
+}
+
+model Achievement {
+  id                   String              @id @default(cuid())
+  name                 String
+  description          String
+  icon                 String
+  rarity               AchievementRarity   @default(COMMON)
+  maxProgress          Int                 @default(0) @map("max_progress")
+  xpReward             Int                 @default(0) @map("xp_reward")
+  badgeReward          String?             @map("badge_reward")
+  conditions           Json?               // JSON object with achievement conditions
+  isActive             Boolean             @default(true) @map("is_active")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+
+  // Relations
+  userAchievements     UserAchievement[]
+
+  @@map("achievements")
+}
+
+model UserAchievement {
+  id                   String              @id @default(cuid())
+  userId               String              @map("user_id") @db.VarChar(50)
+  achievementId        String              @map("achievement_id")
+  progress             Int                 @default(0)
+  completed            Boolean             @default(false)
+  completedAt          DateTime?           @map("completed_at")
+  createdAt            DateTime            @default(now()) @map("created_at")
+
+  // Relations
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement          Achievement         @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, achievementId])
+  @@map("user_achievements")
+}
+
+model Reminder {
+  id                   String              @id @default(cuid())
+  userId               String              @map("user_id") @db.VarChar(50)
+  type                 ReminderType
+  title                String
+  message              String?
+  scheduledTime        DateTime            @map("scheduled_time")
+  status               ReminderStatus      @default(ACTIVE)
+  isRecurring          Boolean             @default(false) @map("is_recurring")
+  recurrencePattern    String?             @map("recurrence_pattern")
+  relatedEntityId      String?             @map("related_entity_id")
+  snoozeUntil          DateTime?           @map("snooze_until")
+  snoozeCount          Int                 @default(0) @map("snooze_count")
+  dismissedAt          DateTime?           @map("dismissed_at")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+
+  // Relations
+  user                 User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("reminders")
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  userId            String        @map("user_id") @db.VarChar(50)
+  amount            Float
+  currency          String        @default("RUB")
+  status            PaymentStatus @default(PENDING)
+  subscriptionType  SubscriptionType @map("subscription_type")
+  
+  // Payment details
+  paymentMethod     String?       @map("payment_method")
+  transactionId     String?       @unique @map("transaction_id")
+  providerResponse  String?       @map("provider_response") // JSON string
+  
+  // Billing period
+  billingPeriodStart DateTime     @map("billing_period_start")
+  billingPeriodEnd   DateTime     @map("billing_period_end")
+  
+  // Timestamps
+  paidAt            DateTime?     @map("paid_at")
+  refundedAt        DateTime?     @map("refunded_at")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  // Relations
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  referralPayouts   ReferralPayout[]
+
+  @@map("payments")
+}
+
+model ReferralPayout {
+  id                String        @id @default(cuid())
+  
+  // Relations
+  referrerId        String        @map("referrer_id")
+  referrer          User          @relation("ReferrerPayouts", fields: [referrerId], references: [id], onDelete: Cascade)
+  
+  referredUserId    String        @map("referred_user_id")
+  referredUser      User          @relation("ReferredPayouts", fields: [referredUserId], references: [id], onDelete: Cascade)
+  
+  // Payment info
+  paymentId         String        @map("payment_id")
+  payment           Payment       @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  
+  // Payout details
+  amount            Float         // Amount in rubles (40% of payment)
+  originalAmount    Float         @map("original_amount") // Original payment amount
+  percentage        Int           @default(40) // Percentage (40%)
+  
+  // Status
+  status            String        @default("pending") // pending, paid, failed
+  
+  // Timestamps
+  createdAt         DateTime      @default(now()) @map("created_at")
+  paidAt            DateTime?     @map("paid_at")
+
+  @@map("referral_payouts")
+}
+
+enum DependencyType {
+  SMOKING
+  ALCOHOL
+  GAMBLING
+  SWEET
+  SOCIAL_MEDIA
+  GAMING
+  OTHER
+}
+
+enum DependencyStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  FAILED
+}
+
+model DependencySupport {
+  id              String           @id @default(cuid())
+  
+  // User relation
+  userId          String           @map("user_id")
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Dependency info
+  type            DependencyType
+  customName      String?          @map("custom_name") // For OTHER type
+  status          DependencyStatus @default(ACTIVE)
+  
+  // Settings
+  morningTime     String           @default("09:00") @map("morning_time") // HH:MM format
+  eveningTime     String           @default("21:00") @map("evening_time") // HH:MM format
+  
+  // Progress tracking
+  daysClean       Int              @default(0) @map("days_clean")
+  totalPromises   Int              @default(0) @map("total_promises")
+  keptPromises    Int              @default(0) @map("kept_promises")
+  lastPromiseDate DateTime?        @map("last_promise_date")
+  lastCheckDate   DateTime?        @map("last_check_date")
+  
+  // Notification tracking - avoid duplicate messages
+  lastMorningSent DateTime?        @map("last_morning_sent")
+  lastEveningSent DateTime?        @map("last_evening_sent")
+  
+  // Timestamps
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+  
+  @@unique([userId, type])
+  @@map("dependency_support")
+}
