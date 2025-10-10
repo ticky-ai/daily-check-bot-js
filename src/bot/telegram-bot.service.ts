@@ -291,6 +291,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Main menu command
     this.bot.command('menu', async (ctx) => {
+      ctx.session.aiChatMode = false
       try {
         // Создаем или находим пользователя
         const userData = {
@@ -320,14 +321,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Home command - quick access to main menu
     this.bot.command('home', async (ctx) => {
+     
       try {
-        await ctx.answerCbQuery?.();
-
         // Clear session state when going to main menu
         ctx.session.step = undefined;
         ctx.session.pendingAction = undefined;
         ctx.session.tempData = undefined;
-
+        ctx.session.aiChatMode = false
         await this.showMainMenu(ctx);
       } catch (error) {
         this.logger.error('Error in home command:', error);
@@ -339,26 +339,31 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Tasks command
     this.bot.command('tasks', async (ctx) => {
+      ctx.session.aiChatMode = false
       await this.showTasksMenu(ctx);
     });
 
     // Habits command
     this.bot.command('habits', async (ctx) => {
+      ctx.session.aiChatMode = false
       await this.showHabitsMenu(ctx);
     });
 
     // Mood command
     this.bot.command('mood', async (ctx) => {
+      ctx.session.aiChatMode = false
       await this.showMoodMenu(ctx);
     });
 
     // Focus command
     this.bot.command('focus', async (ctx) => {
+      ctx.session.aiChatMode = false
       await this.showFocusSession(ctx);
     });
 
     // Help command
     this.bot.command('help', async (ctx) => {
+      ctx.session.aiChatMode = false
       const helpMessage = `
 🤖 *Ticky AI - Справка*
 
@@ -397,6 +402,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Feedback command
     this.bot.command('feedback', async (ctx) => {
+      ctx.session.aiChatMode = false
       try {
         await this.showFeedbackSurvey(ctx);
       } catch (error) {
@@ -413,6 +419,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Test notification command
     this.bot.command('testnotify', async (ctx) => {
+      ctx.session.aiChatMode = false
       try {
         const userId = ctx.from.id.toString();
 
@@ -469,6 +476,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Show active reminders command
     this.bot.command('reminders', async (ctx) => {
+      ctx.session.aiChatMode = false
       try {
         const userId = ctx.from.id.toString();
 
@@ -518,6 +526,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Billing command
     this.bot.command('billing', async (ctx) => {
+      ctx.session.aiChatMode = false
       // Redirect to show_limits handler
       const subscriptionStatus =
         await this.billingService.getSubscriptionStatus(ctx.userId);
@@ -577,6 +586,7 @@ ${statusMessage}
 
     // Reset onboarding command (for testing)
     this.bot.command('reset_onboarding', async (ctx) => {
+      ctx.session.aiChatMode = false
       try {
         await this.userService.updateUser(ctx.userId, {
           onboardingPassed: false,
@@ -593,11 +603,13 @@ ${statusMessage}
 
     // Info command - показывает информацию о мотивационных сообщениях
     this.bot.command('info', async (ctx) => {
+      ctx.session.aiChatMode = false
       await this.showSystemInfo(ctx);
     });
 
     // Test motivation command
     this.bot.command('testmotivation', async (ctx) => {
+      ctx.session.aiChatMode = false
       await this.testMotivationSystem(ctx);
     });
 
