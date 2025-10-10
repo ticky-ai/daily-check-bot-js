@@ -1971,8 +1971,14 @@ ${statusMessage}
     });
 
     this.bot.action('ai_chat', async (ctx) => {
-      await ctx.answerCbQuery();
-      await this.startAIChat(ctx);
+        try {
+          await ctx.answerCbQuery();
+          await this.startAIChat(ctx);
+        } catch (error) {
+          console.error('Error in ai_chat action:', error);
+          // Optionally, notify the user that an error occurred
+          await ctx.reply('🚫 Произошла ошибка. Попробуйте позже или обратитесь к администратору.').catch(console.error);
+        }
     });
 
     this.bot.action('more_functions', async (ctx) => {
@@ -3531,7 +3537,7 @@ ${
         }`;
       }
 
-      await ctx.editMessageTextWithMarkdown(
+      await ctx.replyWithMarkdown(
         `
 📊 *Ваши лимиты и использование*
 
@@ -5162,7 +5168,7 @@ ${moodEmoji} *Настроение записано!*
 
     this.bot.action('faq_support', async (ctx) => {
       await ctx.answerCbQuery();
-      await ctx.editMessageTextWithMarkdown(
+      await ctx.replyWithMarkdown(
         `
 ❓ *FAQ — ЧАСТО ЗАДАВАЕМЫЕ ВОПРОСЫ*
 
@@ -9145,19 +9151,21 @@ ${ratingEmoji} Ваша оценка: ${rating}/5
   }
 
   private async startAIChat(ctx: BotContext) {
+    
     // 🔧 Проверяем лимит AI запросов
     const aiLimitCheck = await this.subscriptionService.checkLimit(
       ctx.userId,
       'aiRequests',
     );
-
     if (!aiLimitCheck.allowed) {
+      
       const limitMessage = this.subscriptionService.getLimitMessage(
         'aiRequests',
         aiLimitCheck.current,
         aiLimitCheck.limit,
       );
-      await ctx.editMessageTextWithMarkdown(limitMessage, {
+
+      await ctx.replyWithMarkdown(limitMessage, {
         reply_markup: {
           inline_keyboard: [
             [{ text: '💎 Получить Premium', callback_data: 'get_premium' }],
@@ -9169,7 +9177,7 @@ ${ratingEmoji} Ваша оценка: ${rating}/5
       return;
     }
 
-    await ctx.editMessageTextWithMarkdown(
+    await ctx.replyWithMarkdown(
       `
 🧠 *ИИ Консультант*
 
@@ -16781,7 +16789,7 @@ ${
 💡 *Продолжайте выполнять задачи и привычки для получения XP!*
       `;
 
-      await ctx.editMessageTextWithMarkdown(message, {
+      await ctx.replyWithMarkdown(message, {
         reply_markup: {
           inline_keyboard: [
             [
@@ -16807,7 +16815,7 @@ ${
       });
     } catch (error) {
       this.logger.error('Error showing main statistics:', error);
-      await ctx.editMessageTextWithMarkdown(
+      await ctx.replyWithMarkdown(
         '❌ Произошла ошибка при загрузке статистики. Попробуйте позже.',
         {
           reply_markup: {
