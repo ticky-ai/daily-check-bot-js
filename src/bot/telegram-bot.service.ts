@@ -7947,15 +7947,15 @@ ${timeAdvice}
       inline_keyboard: [
         [
           { text: '➕ Добавить привычку', callback_data: 'add_habit' },
+        ],
+        [
           { text: '✅ Мои привычки', callback_data: 'my_habits' },
-        ],
-        [
           { text: '📝 Мои задачи', callback_data: 'my_tasks' },
-          { text: '🍅 Помодоро', callback_data: 'pomodoro_focus' },
         ],
         [
-          { text: '🟢 Ещё функции', callback_data: 'more_functions' },
+          { text: '🍅 Помодоро', callback_data: 'pomodoro_focus' },
           { text: '🧠 Чат с ИИ', callback_data: 'ai_chat' },
+          { text: '🟢 Ещё...', callback_data: 'more_functions' },
         ],
         [
           { text: '📊 Прогресс', callback_data: 'my_progress' },
