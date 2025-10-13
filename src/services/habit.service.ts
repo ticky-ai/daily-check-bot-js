@@ -112,6 +112,20 @@ export class HabitService {
     );
   }
 
+  isCompletedTodayTZ(habit: Habit, today_tz: string): boolean {
+    if (!habit.updatedAt) return false;
+
+    const today = new Date(today_tz);
+    const lastUpdate = new Date(habit.updatedAt);
+
+    // Check if the habit was updated today (assuming update means completion)
+    return (
+      today.getFullYear() === lastUpdate.getFullYear() &&
+      today.getMonth() === lastUpdate.getMonth() &&
+      today.getDate() === lastUpdate.getDate()
+    );
+  }
+
   async getHabitStats(userId: string): Promise<{
     total: number;
     active: number;

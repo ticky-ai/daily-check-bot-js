@@ -613,6 +613,43 @@ ${statusMessage}
       await this.testMotivationSystem(ctx);
     });
 
+    this.bot.command('debug', async (ctx) => {
+      try {
+      // Get all users with timezone and active tasks/habits
+      const users = await this.prisma.user.findMany({
+        where: {
+          timezone: { not: null },
+          id: '53527242',
+          OR: [
+            { habits: { some: { isActive: true } } },
+            { tasks: { some: {} } },
+          ],
+        },
+        include: {
+          habits: { where: { isActive: true } },
+          tasks: true,
+        },
+      });
+      for (const user of users) {
+        const userTimezone = user.timezone;
+        console.log(user.habits)
+        if (!userTimezone) {
+                this.logger.log(`Skipping user ${user.id}, no timezone set`);
+                continue;
+              }
+       
+        const nowInUserTz = new Date().toLocaleString("en-US", { timeZone: userTimezone });
+
+        const completedHabbits = user.habits.filter((habit) => this.habitService.isCompletedTodayTZ(habit, nowInUserTz))
+
+        console.log(completedHabbits)
+      }
+    } catch(error) {
+      console.error(error)
+    }
+      
+    });
+
     // Onboarding callback handlers
     this.bot.action('onboarding_start', async (ctx) => {
       await ctx.answerCbQuery();
@@ -7947,22 +7984,39 @@ ${timeAdvice}
       inline_keyboard: [
         [
           { text: '➕ Добавить привычку', callback_data: 'add_habit' },
-        ],
-        [
           { text: '✅ Мои привычки', callback_data: 'my_habits' },
           { text: '📝 Мои задачи', callback_data: 'my_tasks' },
         ],
         [
-          { text: '🍅 Помодоро', callback_data: 'pomodoro_focus' },
-          { text: '🧠 Чат с ИИ', callback_data: 'ai_chat' },
+          { text: '🍅 Фокус', callback_data: 'pomodoro_focus' },
+          { text: '🧠 ИИ чат', callback_data: 'ai_chat' },
           { text: '🟢 Ещё...', callback_data: 'more_functions' },
         ],
         [
           { text: '📊 Прогресс', callback_data: 'my_progress' },
           { text: '❓ Помощь', callback_data: 'faq_support' },
           { text: '🔒 Лимиты', callback_data: 'show_limits' },
-        ],
+        ], 
       ],
+      // inline_keyboard: [
+      //   [
+      //     { text: '➕ Добавить привычку', callback_data: 'add_habit' },
+      //   ],
+      //   [
+      //     { text: '✅ Мои привычки', callback_data: 'my_habits' },
+      //     { text: '📝 Мои задачи', callback_data: 'my_tasks' },
+      //   ],
+      //   [
+      //     { text: '🍅 Фокус', callback_data: 'pomodoro_focus' },
+      //     { text: '🧠 ИИ чат', callback_data: 'ai_chat' },
+      //     { text: '🟢 Ещё...', callback_data: 'more_functions' },
+      //   ],
+      //   [
+      //     { text: '📊 Прогресс', callback_data: 'my_progress' },
+      //     { text: '❓ Помощь', callback_data: 'faq_support' },
+      //     { text: '🔒 Лимиты', callback_data: 'show_limits' },
+      //   ],
+      // ],
     };
 
     const user = await this.getOrCreateUser(ctx);
@@ -8107,6 +8161,7 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
         { command: 'billing', description: '💎 Мои лимиты и подписка' },
         { command: 'feedback', description: '💬 Обратная связь' },
         { command: 'help', description: '🆘 Справка' },
+        { command: 'debug', description: '🆘 DEBUG' },
       ]);
 
       // Устанавливаем Menu Button - кнопку меню рядом с полем ввода

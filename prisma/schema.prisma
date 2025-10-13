@@ -222,6 +222,8 @@ model Habit {
   lastCompletedAt   DateTime?      @map("last_completed_at")
   createdAt         DateTime       @default(now()) @map("created_at")
   updatedAt         DateTime       @updatedAt @map("updated_at")
+  previousUpdatedAt DateTime?       @map("previous_updated_at")
+ 
 
   // Relations
   user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)

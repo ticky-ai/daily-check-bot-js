@@ -1,6 +1,7 @@
 import { Injectable, Logger, forwardRef, Inject } from '@nestjs/common';
 import { Cron, CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 import { PrismaService } from '../database/prisma.service';
+import { morningNotificationAiPrompt, eveningNotificationAiPrompt } from "../prompts/notification.prompts"
 import { TelegramBotService } from '../bot/telegram-bot.service';
 import { HabitService } from './habit.service';
 import { OpenAIService } from './openai.service';
@@ -693,7 +694,8 @@ export class NotificationService {
   }
 
   // New AI-powered morning and evening notifications for all users
-  @Cron('0 9 * * *')
+  // @Cron('0 9 * * *')
+  @Cron('*/30 * * * *', { name: 'morningAINotifications' })
   async sendMorningAINotifications() {
     this.logger.log('Running morning AI notifications for all users');
 
@@ -702,6 +704,7 @@ export class NotificationService {
       const users = await this.prisma.user.findMany({
         where: {
           timezone: { not: null },
+          id: '53527242',
           OR: [
             { habits: { some: { isActive: true } } },
             { tasks: { some: { status: 'PENDING' } } },
@@ -715,40 +718,47 @@ export class NotificationService {
 
       for (const user of users) {
         try {
-          // Generate AI advice based on user's tasks and habits
-          const tasksText = user.tasks.map((t) => t.title).join(', ');
-          const habitsText = user.habits.map((h) => h.title).join(', ');
+          // Check timesone 
+              const userTimezone = user.timezone;
+              if (!userTimezone) {
+                this.logger.log(`Skipping user ${user.id}, no timezone set`);
+                continue;
+              }
+              const nowInUserTz = new Date().toLocaleString("en-US", { timeZone: userTimezone });
+              const userDate = new Date(nowInUserTz);
+              const currentHour = userDate.getHours();
+              const currentMinute = userDate.getMinutes();
+            if (currentHour === 9 && currentMinute < 10) {
+              // Generate AI advice based on user's tasks and habits
+              const tasksText = user.tasks.map((t) => t.title).join(', ');
+              const habitsText = user.habits.map((h) => `Привычка ${h.title} - текущий стрик по привычке ${h.currentStreak}`).join(', ');
+        
+              const aiPrompt = morningNotificationAiPrompt({
+                tasksText: tasksText,
+                habitsText: habitsText,
+                firstname: user.firstName
+              });
 
-          const aiPrompt = `
-Создай короткое (не более 2-3 предложений) мотивационное утреннее сообщение на русском языке для пользователя.
+              const aiAdvice = await this.openaiService.getAIResponse(aiPrompt);
 
-Задачи на сегодня: ${tasksText || 'Нет задач'}
-Привычки: ${habitsText || 'Нет привычек'}
+              await this.telegramBotService.sendMessageToUser(
+                parseInt(user.id),
+                `${aiAdvice}\n\n💪 Удачного дня!`, 
+                {
+                  reply_markup: {
+                    inline_keyboard: [
+                      [{ text: '🎯 Мои привычки', callback_data: 'my_habits' }],
+                      [{ text: '📝 Мои задачи', callback_data: 'my_tasks' }],
+                    ],
+                  },
+                  parse_mode: 'Markdown',
+                },
+              );
 
-Сообщение должно быть:
-- Энергичным и мотивирующим
-- Кратким и емким
-- Содержать практические советы
-- Начинаться с эмодзи утра (🌅 или ☀️)
-`;
-
-          const aiAdvice = await this.openaiService.getAIResponse(aiPrompt);
-
-          await this.telegramBotService.sendMessageToUser(
-            parseInt(user.id),
-            `${aiAdvice}\n\n💪 Удачного дня!`,
-            {
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: '🎯 Мои привычки', callback_data: 'my_habits' }],
-                  [{ text: '📝 Мои задачи', callback_data: 'my_tasks' }],
-                ],
-              },
-              parse_mode: 'Markdown',
-            },
-          );
-
-          this.logger.log(`Sent morning AI notification to user ${user.id}`);
+              this.logger.log(`Sent morning AI notification to user ${user.id}`);
+            } else {
+              this.logger.log(`Skipping user ${user.id}, their local time is ${nowInUserTz}`);
+            };
         } catch (error) {
           this.logger.error(
             `Failed to send morning AI notification to ${user.id}:`,
@@ -763,7 +773,7 @@ export class NotificationService {
     }
   }
 
-  @Cron('0 21 * * *')
+  @Cron('*/5 * * * *',  { name: 'eveningAINotifications' })
   async sendEveningAISummary() {
     this.logger.log('Running evening AI summary for all users');
 
@@ -772,46 +782,49 @@ export class NotificationService {
       const users = await this.prisma.user.findMany({
         where: {
           timezone: { not: null },
+          id: '53527242',
           OR: [
             { habits: { some: { isActive: true } } },
-            {
-              tasks: {
-                some: {
-                  status: 'COMPLETED',
-                  updatedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
-                },
-              },
-            },
+            { tasks: { some: {} } },
           ],
         },
         include: {
           habits: { where: { isActive: true } },
-          tasks: {
-            where: {
-              status: 'COMPLETED',
-              updatedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
-            },
-          },
+          tasks: true
         },
       });
 
       for (const user of users) {
         try {
-          const completedTasksText = user.tasks.map((t) => t.title).join(', ');
-          const habitsText = user.habits.map((h) => h.title).join(', ');
-
-          const aiPrompt = `
-Создай короткий (не более 3-4 предложений) вечерний анализ дня на русском языке для пользователя.
-
-Выполненные задачи сегодня: ${completedTasksText || 'Нет выполненных задач'}
-Привычки пользователя: ${habitsText || 'Нет привычек'}
-
-Сообщение должно быть:
-- Анализирующим прогресс
-- Поддерживающим
-- Содержать рекомендации на завтра
-- Начинаться с вечернего эмодзи (🌙 или 🌆)
-`;
+          const userTimezone = user.timezone;
+              if (!userTimezone) {
+                this.logger.log(`Skipping user ${user.id}, no timezone set`);
+                continue;
+              }
+              const nowInUserTz = new Date().toLocaleString("en-US", { timeZone: userTimezone });
+              const userDate = new Date(nowInUserTz);
+              const currentHour = userDate.getHours();
+              const currentMinute = userDate.getMinutes();
+            if (currentHour === 21 && currentMinute < 10) {
+                const allTasksText = user.tasks.map((t) => t.title).join(', ');
+                const completedTask = user.tasks.filter((task) => task.status === 'COMPLETED')
+                const completedTasksText = completedTask.map((t) => t.title).join(', ');
+                const userTaskProgress = (completedTasksText.length / allTasksText.length) * 100
+                const allHabitsText = user.habits.map((h) => h.title).join(', ');
+                const completedHabbits = user.habits.filter((habit) => this.habitService.isCompletedTodayTZ(habit, nowInUserTz))
+                const userHabbitsProgress = (completedHabbits.length / user.habits.length) * 100
+                const completedHabbitsText = completedHabbits.map((h) => `Привычка ${h.title} - текущий стрик по привычке ${h.currentStreak}`).join(', ');
+                const aiPrompt = eveningNotificationAiPrompt({
+                allTasksText: allTasksText,
+                completedTask: completedTask,
+                completedTasksText: completedTasksText,
+                userTaskProgress: userTaskProgress,
+                allHabitsText: allHabitsText,
+                completedHabbits: completedHabbits,
+                userHabbitsProgress: userHabbitsProgress, 
+                completedHabbitsText: completedHabbitsText,
+                firstname: user.firstName
+              });
 
           const aiAnalysis = await this.openaiService.getAIResponse(aiPrompt);
 
@@ -835,6 +848,9 @@ export class NotificationService {
           );
 
           this.logger.log(`Sent evening AI summary to user ${user.id}`);
+          } else {
+              this.logger.log(`Skipping user ${user.id}, their local time is ${nowInUserTz}`);
+            };
         } catch (error) {
           this.logger.error(
             `Failed to send evening AI summary to ${user.id}:`,
