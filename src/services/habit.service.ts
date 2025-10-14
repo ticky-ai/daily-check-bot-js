@@ -88,6 +88,7 @@ export class HabitService {
         currentStreak: habit.currentStreak + 1,
         maxStreak: Math.max(habit.maxStreak, habit.currentStreak + 1),
         updatedAt: new Date(), // Use updatedAt to track when it was last completed
+        previousUpdatedAt: habit.updatedAt,
       },
     });
 
@@ -95,6 +96,33 @@ export class HabitService {
       `Completed habit: ${habitId}, XP gained: ${habit.xpReward}`,
     );
     return { habit: updatedHabit, xpGained: habit.xpReward };
+  }
+
+   async cancelHabit(
+    habitId: string,
+    userId: string,
+  ): Promise<{ habit: Habit; xpRelinquished: number }> {
+    const habit = await this.findHabitById(habitId, userId);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    // Update streak and total completions
+    const updatedHabit = await this.prisma.habit.update({
+      where: { id: habitId },
+      data: {
+        totalCompletions: habit.totalCompletions - 1,
+        currentStreak: habit.currentStreak - 1,
+        maxStreak: Math.max(habit.maxStreak, habit.currentStreak - 1),
+        updatedAt: habit.previousUpdatedAt || yesterday,
+        previousUpdatedAt: null,
+      },
+    });
+
+    this.logger.log(
+      `Canceled habit: ${habitId}, XP gained: ${habit.xpReward}`,
+    );
+    return { habit: updatedHabit, xpRelinquished: habit.xpReward };
   }
 
   // Helper function to check if habit was completed today

@@ -704,7 +704,6 @@ export class NotificationService {
       const users = await this.prisma.user.findMany({
         where: {
           timezone: { not: null },
-          id: '53527242',
           OR: [
             { habits: { some: { isActive: true } } },
             { tasks: { some: { status: 'PENDING' } } },
@@ -773,7 +772,7 @@ export class NotificationService {
     }
   }
 
-  @Cron('*/5 * * * *',  { name: 'eveningAINotifications' })
+  @Cron('*/30 * * * *',  { name: 'eveningAINotifications' })
   async sendEveningAISummary() {
     this.logger.log('Running evening AI summary for all users');
 
@@ -782,7 +781,6 @@ export class NotificationService {
       const users = await this.prisma.user.findMany({
         where: {
           timezone: { not: null },
-          id: '53527242',
           OR: [
             { habits: { some: { isActive: true } } },
             { tasks: { some: {} } },
