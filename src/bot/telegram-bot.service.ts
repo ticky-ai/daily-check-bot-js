@@ -698,8 +698,6 @@ ${statusMessage}
 • Делать зарядку утром
 • Читать перед сном
 
-*Напиши название привычки:*
-
 ⬇️ *Введите название привычки в поле для ввода ниже*
       `,
         {
@@ -823,10 +821,18 @@ ${statusMessage}
 
     // Handle text input during onboarding
     this.bot.on('text', async (ctx) => {
+
       const user = await this.getOrCreateUser(ctx);
 
       // Update user activity for referral tracking
       await this.updateUserActivity(ctx.userId);
+
+      // Handle task creation
+      if (ctx.session.step === 'waiting_for_task_title') {
+ 
+        await this.handleTaskCreation(ctx, ctx.message.text);
+        return;
+      }
 
       // Skip if this is a command (starts with /) - FIRST CHECK
       if (ctx.message.text.startsWith('/')) {
@@ -934,11 +940,7 @@ ${statusMessage}
         return;
       }
 
-      // Handle task creation
-      if (ctx.session.step === 'waiting_for_task_title') {
-        await this.handleTaskCreation(ctx, ctx.message.text);
-        return;
-      }
+      
 
       // Handle custom feedback
       if (ctx.session.step === 'waiting_for_custom_feedback') {
@@ -1373,7 +1375,7 @@ ${statusMessage}
       } else {
         ctx.session.step = 'adding_habit';
         await ctx.editMessageTextWithMarkdown(
-          '🔄 *Добавление привычки*\n\nВыберите готовый пример или введите название привычки вручную:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+          '🔄 *Добавление привычки*\n\n⬇️ *Выберите готовый пример или введите название привычки в поле для ввода ниже*',
           {
             reply_markup: {
               inline_keyboard: [
@@ -1442,7 +1444,7 @@ ${statusMessage}
       await ctx.answerCbQuery();
       ctx.session.step = 'adding_habit'; // Add this line!
       await ctx.editMessageTextWithMarkdown(
-        '🔄 *Добавление привычки*\n\nВведите название привычки, которую хотите отслеживать:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+        '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычк, которую хотите отслеживать, в поле для ввода ниже*',
         {
           reply_markup: {
             inline_keyboard: [
@@ -1912,7 +1914,7 @@ ${statusMessage}
         ctx.session.step = 'adding_habit';
         try {
           await ctx.editMessageTextWithMarkdown(
-            '🔄 *Добавление привычки*\n\nВыберите готовый пример или введите название привычки вручную:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+            '🔄 *Добавление привычки*\n\n⬇️  *Выберите готовый пример или введите название привычки в поле для ввода ниже*',
             {
               reply_markup: {
                 inline_keyboard: [
@@ -1954,7 +1956,7 @@ ${statusMessage}
         } catch (error) {
           // If editing fails (e.g., trying to edit a photo message), send a new message
           await ctx.replyWithMarkdown(
-            '🔄 *Добавление привычки*\n\nВыберите готовый пример или введите название привычки вручную:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+            '🔄 *Добавление привычки*\n\n⬇️ *Выберите готовый пример или введите название привычки в поле для ввода ниже*',
             {
               reply_markup: {
                 inline_keyboard: [
@@ -8038,11 +8040,25 @@ ${timeAdvice}
     if (totalHabits > 0) {
       // Создаем визуальный прогресс для каждой привычки — заполняется слева направо
       const completedCount = completedHabits.length;
-      const habitProgress =
-        '🟩'.repeat(completedCount) +
-        '⬜'.repeat(Math.max(0, totalHabits - completedCount));
 
-      habitsProgressBar = `\n🎯 **Привычки на ${new Date().toLocaleDateString('ru-RU')}:**\nПрогресс: ${habitProgress} ${completedCount}/${totalHabits}`;
+      // Progress bar visualization (red -> yellow -> green)
+      const progressPercentage =
+        totalHabits > 0 ? (completedCount / totalHabits) * 100 : 0;
+      let progressColor = '🔴';
+      let progressSquare = '🟥';
+      if (progressPercentage >= 30 && progressPercentage < 70) {
+        progressColor = '🟡';
+        progressSquare = '🟨';
+      } else if (progressPercentage >= 70) {
+        progressColor = '🟢';
+        progressSquare = '🟩';
+      }
+
+      const habitProgressBar =
+      progressSquare.repeat(completedCount) +
+      '⬜'.repeat(Math.max(0, totalHabits - completedCount));
+
+      habitsProgressBar = `\n🎯 **Привычки на ${new Date().toLocaleDateString('ru-RU')}:**\n\n${progressColor} **Прогресс:** ${habitProgressBar} ${completedCount}/${totalHabits}\n\n`;
     } else {
       habitsProgressBar = `\n🎯 **Привычки на сегодня:** Пока нет привычек`;
     }
@@ -8294,17 +8310,11 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
 
     await ctx.replyWithMarkdown(
       `
-➕ *Создание новой задачи*
+✨ **Давайте создадим задачу!**
 
-📊 **Задач сегодня:** ${limitCheck.current}${limitCheck.limit === -1 ? '' : `/${limitCheck.limit}`}
+Просто **напишите** её или **отправьте голосовое** 🎙️ — я всё пойму.
 
-� **Способы создания задачи:**
-• �📝 Напишите текстом название задачи
-• 🎙️ Отправьте голосовое сообщение
-
-🤖 **Я все пойму!** 
-
-⬇️ *Введите название задачи в поле для ввода ниже или отправьте голосовое сообщение*
+Жду вашу задачу 👇
     `,
       {
         reply_markup: {
@@ -8960,7 +8970,7 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
       ctx.session.pendingAction = undefined;
       ctx.session.step = 'adding_habit';
       await ctx.replyWithMarkdown(
-        '🔄 *Добавление привычки*\n\nВведите название привычки, которую хотите отслеживать:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+        '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычки, которую хотите отслеживать, в поле для ввода ниже*',
         {
           reply_markup: {
             inline_keyboard: [
@@ -9890,6 +9900,12 @@ _Попробуйте еще раз_
 
       const prettyMessage = `🎤 *Обработано голосовое сообщение*\n\n🎯 *Распознано:* "${originalTranscribed}"\n\nЯ автоматически определю, что вы хотели: создать задачу, напоминание или привычку. Подождите, пожалуйста...`;
 
+      if (ctx.session.step === 'waiting_for_task_title') {
+ 
+        await this.handleTaskCreation(ctx, normalizedTranscribed);
+        return;
+      }
+      
       await ctx.replyWithMarkdown(prettyMessage, {
         reply_markup: {
           inline_keyboard: [
@@ -11859,7 +11875,7 @@ ${aiAdvice}
           };
 
           if (ctx.callbackQuery) {
-            await ctx.editMessageTextWithMarkdown(message, keyboard);
+            await ctx.replyWithMarkdown(message, keyboard);
           } else {
             await ctx.replyWithMarkdown(message, keyboard);
           }
@@ -11905,24 +11921,40 @@ ${aiAdvice}
           const keyboard = {
             reply_markup: { 
               inline_keyboard: [
+                ...habits
+                  .map((habit) => [
+                    this.habitService.isCompletedToday(habit)?
+                    (
+                      {
+                        text: `✅ ${habit.title.substring(0, 30)}${habit.title.length > 30 ? '...' : ''}`,
+                        callback_data: `habit_quick_cancel_${habit.id}`,
+                      })
+                    :
+                    (
+                      {
+                        text: `⬜ ${habit.title.substring(0, 30)}${habit.title.length > 30 ? '...' : ''}`,
+                        callback_data: `habit_quick_complete_${habit.id}`,
+                      }
+                    )
+                  ]),
                 // Quick completion buttons for incomplete habits
-                ...habits
-                  .filter((h) => !this.habitService.isCompletedToday(h))
-                  .map((habit) => [
-                    {
-                      text: `⬜ ${habit.title.substring(0, 30)}${habit.title.length > 30 ? '...' : ''}`,
-                      callback_data: `habit_quick_complete_${habit.id}`,
-                    },
-                  ]),
-                // Quick completion buttons for complete habits
-                ...habits
-                  .filter((h) => this.habitService.isCompletedToday(h))
-                  .map((habit) => [
-                    {
-                      text: `✅ ${habit.title.substring(0, 30)}${habit.title.length > 30 ? '...' : ''}`,
-                      callback_data: `habit_quick_cancel_${habit.id}`,
-                    },
-                  ]),
+                // ...habits
+                //   .filter((h) => !this.habitService.isCompletedToday(h))
+                //   .map((habit) => [
+                //     {
+                //       text: `⬜ ${habit.title.substring(0, 30)}${habit.title.length > 30 ? '...' : ''}`,
+                //       callback_data: `habit_quick_complete_${habit.id}`,
+                //     },
+                //   ]),
+                // // Quick completion buttons for complete habits
+                // ...habits
+                //   .filter((h) => this.habitService.isCompletedToday(h))
+                //   .map((habit) => [
+                //     {
+                //       text: `✅ ${habit.title.substring(0, 30)}${habit.title.length > 30 ? '...' : ''}`,
+                //       callback_data: `habit_quick_cancel_${habit.id}`,
+                //     },
+                //   ]),
                 // Management and additional buttons
                 [
                   { text: '➕ Добавить', callback_data: 'habits_add' },
@@ -11933,7 +11965,7 @@ ${aiAdvice}
                 ],
                 [
                   {
-                    text: '🤖 AI - совет по задачам',
+                    text: '🤖 AI - совет по привычкам',
                     callback_data: 'habits_ai_advice',
                   },
                 ],
@@ -13982,7 +14014,7 @@ ${this.getItemActivationMessage(itemType)}`,
                   callback_data: 'habits_manage',
                 },
               ],
-              [{ text: '🏠 В главное меню', callback_data: 'main_menu' }],
+              [{ text: '🏠 В главное меню', callback_data: 'back_to_menu' }],
             ],
           },
         },
@@ -14030,7 +14062,7 @@ ${this.getItemActivationMessage(itemType)}`,
         ctx.session.pendingAction = undefined;
         ctx.session.step = 'adding_habit';
         await ctx.editMessageTextWithMarkdown(
-          '🔄 *Добавление привычки*\n\nВведите название привычки, которую хотите отслеживать:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+          '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычки, которую хотите отслеживать, в поле для ввода ниже*',
           {
             reply_markup: {
               inline_keyboard: [
@@ -14119,7 +14151,7 @@ ${this.getItemActivationMessage(itemType)}`,
 
     ctx.session.step = 'adding_habit';
     await ctx.replyWithMarkdown(
-      '🔄 *Добавление привычки*\n\nВыберите готовый пример или введите название привычки вручную:\n\n⬇️ *Введите название привычки в поле для ввода ниже*',
+      '🔄 *Добавление привычки*\n\nn⬇️ *Выберите готовый пример или введите название привычки вручную:*',
       {
         reply_markup: {
           inline_keyboard: [

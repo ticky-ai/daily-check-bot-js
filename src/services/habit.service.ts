@@ -10,13 +10,17 @@ export class HabitService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createHabit(createHabitDto: CreateHabitDto): Promise<Habit> {
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
     const habit = await this.prisma.habit.create({
       data: {
         ...createHabitDto,
         xpReward: createHabitDto.xpReward || 5,
+        updatedAt: yesterday,
       },
     });
-
     this.logger.log(`Created habit: ${habit.id} for user: ${habit.userId}`);
     return habit;
   }
