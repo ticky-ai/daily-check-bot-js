@@ -803,9 +803,19 @@ export class NotificationService {
               const userDate = new Date(nowInUserTz);
               const currentHour = userDate.getHours();
               const currentMinute = userDate.getMinutes();
+
+              const isToday = (date) => {
+              const today = new Date();
+              const compareDate = new Date(date);
+                
+              return compareDate.getDate() === today.getDate() &&
+                      compareDate.getMonth() === today.getMonth() &&
+                      compareDate.getFullYear() === today.getFullYear();
+              };
+
             if (currentHour === 21 && currentMinute < 10) {
                 const allTasksText = user.tasks.map((t) => t.title).join(', ');
-                const completedTask = user.tasks.filter((task) => task.status === 'COMPLETED')
+                const completedTask = user.tasks.filter((task) => task.status === 'COMPLETED' && isToday(task.completedAt))
                 const completedTasksText = completedTask.map((t) => t.title).join(', ');
                 const userTaskProgress = (completedTasksText.length / allTasksText.length) * 100
                 const allHabitsText = user.habits.map((h) => h.title).join(', ');

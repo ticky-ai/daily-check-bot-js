@@ -615,34 +615,25 @@ ${statusMessage}
 
     this.bot.command('debug', async (ctx) => {
       try {
+        this.userService.updateUser('73952802', {
+        isTrialActive: true,
+        isPremium: true,
+        subscriptionType: 'PREMIUM', 
+      });
       // Get all users with timezone and active tasks/habits
       const users = await this.prisma.user.findMany({
-        where: {
-          timezone: { not: null },
-          id: '53527242',
-          OR: [
-            { habits: { some: { isActive: true } } },
-            { tasks: { some: {} } },
-          ],
-        },
-        include: {
-          habits: { where: { isActive: true } },
-          tasks: true,
-        },
       });
       for (const user of users) {
         const userTimezone = user.timezone;
-        console.log(user.habits)
+        console.log(user)
         if (!userTimezone) {
                 this.logger.log(`Skipping user ${user.id}, no timezone set`);
                 continue;
               }
        
         const nowInUserTz = new Date().toLocaleString("en-US", { timeZone: userTimezone });
+ 
 
-        const completedHabbits = user.habits.filter((habit) => this.habitService.isCompletedTodayTZ(habit, nowInUserTz))
-
-        console.log(completedHabbits)
       }
     } catch(error) {
       console.error(error)
@@ -2006,26 +1997,7 @@ ${statusMessage}
 
     this.bot.action('my_tasks', async (ctx) => {
       await ctx.answerCbQuery();
-      const keyboard = {
-        inline_keyboard: [
-          [{ text: '➕ Добавить задачу', callback_data: 'tasks_add' }],
-          [{ text: '📋 Список задач', callback_data: 'tasks_list' }],
-          [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }],
-        ],
-      };
-      try {
-        await ctx.editMessageTextWithMarkdown(
-          '📝 *Мои задачи*\n\nВыберите действие:',
-          {
-            reply_markup: keyboard,
-          },
-        );
-      } catch (error) {
-        // If editing fails (e.g., trying to edit a photo message), send a new message
-        await ctx.replyWithMarkdown('📝 *Мои задачи*\n\nВыберите действие:', {
-          reply_markup: keyboard,
-        });
-      }
+      await this.showTasksMenu(ctx);
     });
 
     this.bot.action('ai_chat', async (ctx) => {
@@ -5541,7 +5513,7 @@ XP (опыт) начисляется за выполнение задач. С к
 
     // Handle task completion
     this.bot.action(/^task_complete_(.+)$/, async (ctx) => {
-      await ctx.answerCbQuery();
+      await ctx.answerCbQuery('🎉 Отлично! Задача выполнена!');
       const taskId = ctx.match[1];
       await this.completeTask(ctx, taskId);
     });
@@ -5702,14 +5674,21 @@ XP (опыт) начисляется за выполнение задач. С к
 
     // Reopen a completed task
     this.bot.action(/^task_reopen_(.+)$/, async (ctx) => {
-      await ctx.answerCbQuery();
+      await ctx.answerCbQuery('📝 Задача возвращена в активные.');
       const taskId = ctx.match[1];
       try {
         await this.taskService.updateTask(taskId, ctx.userId, {
           status: 'PENDING',
         } as any);
-        await ctx.replyWithMarkdown('✅ Задача возвращена в активные.');
-        await this.showTodayTasks(ctx);
+        
+        const userBefore = await this.userService.findByTelegramId(ctx.userId);
+
+        const statsUpdate = await this.userService.updateStats(ctx.userId, {
+          todayTasks: userBefore.todayTasks - 1,
+          xpGained: -10,
+        });
+
+        await this.showTasksMenu(ctx);
       } catch (err) {
         this.logger.error('Error reopening task:', err);
         await ctx.replyWithMarkdown('❌ Не удалось вернуть задачу.');
@@ -8227,49 +8206,106 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
     return this.bot;
   }
 
+  
+
   // Task management methods
   private async showTasksMenu(ctx: BotContext) {
+
+    const isToday = (date) => {
+      const today = new Date();
+      const compareDate = new Date(date);
+      
+      return compareDate.getDate() === today.getDate() &&
+            compareDate.getMonth() === today.getMonth() &&
+            compareDate.getFullYear() === today.getFullYear();
+    };
+
+    const user = await this.userService.findByTelegramId(ctx.userId);
+    const allTasks = await this.taskService.findTasksByUserId(user.id);
+    const filteredTasks = allTasks.filter(
+        (task) => task.status !== 'COMPLETED' || 
+                  (task.status === 'COMPLETED' && isToday(task.completedAt))
+      );
+
+    const pendingTasks = filteredTasks.filter(
+      (task) => task.status !== 'COMPLETED',
+    );
+    const completedTasks = filteredTasks.filter(
+      (task) => task.status === 'COMPLETED',
+    );
+
+    const totalTasks = filteredTasks.length;
+
+    // Progress bar visualization (red -> yellow -> green)
+    const progressPercentage =
+      totalTasks > 0 ? (completedTasks.length / totalTasks) * 100 : 0;
+    let progressColor = '🔴';
+    let progressSquare = '🟥';
+    if (progressPercentage >= 30 && progressPercentage < 70) {
+      progressColor = '🟡';
+      progressSquare = '🟨';
+    } else if (progressPercentage >= 70) {
+      progressColor = '🟢';
+      progressSquare = '🟩';
+    }
+
+    const taskProgressBar =
+      progressSquare.repeat(completedTasks.length) +
+      '⬜'.repeat(Math.max(0, totalTasks - completedTasks.length));
+
+    let message = `📝 *Мои задачи*\n\n`;
+
+    message += `${progressColor} **Прогресс:** ${taskProgressBar} ${completedTasks.length}/${totalTasks}\n\n`;
+    message += `💎 **XP:** ${user.totalXp || 0} | 🏆 **Уровень:** ${user.level || 1}\n\n`;
+    message += `📅 **${new Date().toLocaleDateString('ru-RU')}**\n\n`;
+
+    // message += `🔥 **Всего задач выполнено:** ${user.completedTasks || 0}\n`;
+    message += `⭐ **Общий XP:** ${user.totalXp || 0}`;
+    
     const keyboard = {
+      reply_markup: { 
       inline_keyboard: [
+         ...filteredTasks
+        .map((task) => [
+          task.status === 'COMPLETED'?
+          (
+            {
+              text: `✅ ${task.title.substring(0, 45)}${task.title.length > 45 ? '...' : ''}`,
+              callback_data: `task_reopen_${task.id}`,
+            }
+          )
+          :
+          (
+            {
+            text: `⬜ ${task.title.substring(0, 30)}${task.title.length > 30 ? '...' : ''}     `,
+            callback_data: `task_complete_${task.id}`,
+            })
+        ]),
         [
-          { text: '➕ Добавить задачу', callback_data: 'tasks_add' },
-          { text: '📋 Все задачи', callback_data: 'tasks_list' },
+        { text: '➕ Добавить', callback_data: 'tasks_add' },
+        {
+          text: '✏️ Редактировать', callback_data: 'edit_tasks_menu',
+        },
         ],
         [{ text: '🤖 AI-совет по задачам', callback_data: 'tasks_ai_advice' }],
         [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
       ],
+    }
     };
 
-    const message = `
-📝 *Управление задачами*
-
-Выберите действие:
-    `;
+    
 
     // Check if this is a callback query (can edit) or command (need to reply)
     if (ctx.callbackQuery) {
-      try {
-        await ctx.editMessageTextWithMarkdown(message, {
-          reply_markup: keyboard,
-        });
-      } catch (err) {
-        const e = err as any;
-        const desc = e?.response?.description || e?.message || '';
-        if (
-          typeof desc === 'string' &&
-          desc.includes('message is not modified')
-        ) {
-          this.logger.log(
-            'Edit resulted in no-op, sending a new message instead (showTasksList)',
-          );
-          await ctx.replyWithMarkdown(message, { reply_markup: keyboard });
-        } else {
-          throw err;
-        }
-      }
-    } else {
-      await ctx.replyWithMarkdown(message, { reply_markup: keyboard });
-    }
+            try {
+              await ctx.editMessageTextWithMarkdown(message, keyboard);
+            } catch (error) {
+              // Fallback for photo messages - reply instead of edit
+              await ctx.replyWithMarkdown(message, keyboard);
+            }
+          } else {
+            await ctx.replyWithMarkdown(message, keyboard);
+          }
   }
 
   private async startAddingTask(ctx: BotContext) {
@@ -8800,20 +8836,21 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
       });
 
       // Просто обновляем список задач без показа сообщения
-      await ctx.answerCbQuery('✅ Задача выполнена!');
 
-      // Определяем, где находимся, и обновляем соответствующий список
-      const currentMessage = (ctx.callbackQuery?.message as any)?.text;
-      if (currentMessage?.includes('Все активные задачи')) {
-        // Мы в общем списке всех задач
-        await this.showAllTasksList(ctx);
-      } else if (currentMessage?.includes('Задачи на сегодня')) {
-        // Мы в списке задач на сегодня
-        await this.showTodayTasks(ctx);
-      } else {
-        // По умолчанию возвращаемся к списку задач на сегодня
-        await this.showTodayTasks(ctx);
-      }
+      await this.showTasksMenu(ctx)
+
+      // // Определяем, где находимся, и обновляем соответствующий список
+      // const currentMessage = (ctx.callbackQuery?.message as any)?.text;
+      // if (currentMessage?.includes('Все активные задачи')) {
+      //   // Мы в общем списке всех задач
+      //   await this.showAllTasksList(ctx);
+      // } else if (currentMessage?.includes('Задачи на сегодня')) {
+      //   // Мы в списке задач на сегодня
+      //   await this.showTodayTasks(ctx);
+      // } else {
+      //   // По умолчанию возвращаемся к списку задач на сегодня
+      //   await this.showTodayTasks(ctx);
+      // }
     } catch (error) {
       this.logger.error('Error completing task:', error);
       if (error.message.includes('already completed')) {
@@ -13251,7 +13288,7 @@ ${this.getItemActivationMessage(itemType)}`,
 
       // Проверяем, выполнены ли все привычки
       const allHabits = await this.habitService.findHabitsByUserId(ctx.userId);
-      const allCompleted = allHabits.every((h) => h.currentStreak > 0); // Simplified check
+      const allCompleted = allHabits.every((h) => this.habitService.isCompletedToday(h)); // Simplified check
 
       // Обновляем меню привычек с анимацией
       await this.showHabitsMenu(ctx);
@@ -16855,18 +16892,14 @@ ${this.getItemActivationMessage(itemType)}`,
       const level = user.level || 1;
 
       // Calculate XP for current level (each level requires level * 100 XP)
-      let xpRequiredForCurrentLevel = 0;
-      for (let i = 1; i < level; i++) {
-        xpRequiredForCurrentLevel += i * 100;
-      }
-
-      const xpForNextLevel = level * 100; // XP needed to reach next level
+      let xpRequiredForCurrentLevel = (Math.pow((level-1), 2)) * 100;
+      const xpForNextLevel = Math.pow((level), 2) * 100; // XP needed to reach next level
       const currentLevelXP = Math.max(0, totalXP - xpRequiredForCurrentLevel); // XP progress within current level
-      const xpToNextLevel = Math.max(0, xpForNextLevel - currentLevelXP);
-
+      const xpToNextLevel = Math.max(0, xpForNextLevel - xpRequiredForCurrentLevel);
+      
       // Create progress bar
       const progressRatio =
-        xpForNextLevel > 0 ? currentLevelXP / xpForNextLevel : 0;
+        xpForNextLevel > 0 ? currentLevelXP / xpToNextLevel : 0;
       const progressBarLength = 10;
       const filledBars = Math.floor(progressRatio * progressBarLength);
       const emptyBars = progressBarLength - filledBars;
@@ -16881,8 +16914,8 @@ ${this.getItemActivationMessage(itemType)}`,
 
 🎯 **Прогресс уровня:**
 \`${progressBar}\` ${Math.round(progressRatio * 100)}%
-📈 ${currentLevelXP}/${xpForNextLevel} XP до ${level + 1} уровня
-⏳ Осталось: ${xpToNextLevel} XP
+📈 ${totalXP}/${xpForNextLevel} XP до ${level + 1} уровня
+⏳ Осталось: ${xpToNextLevel - currentLevelXP} XP
 
 📅 В системе с: ${user.createdAt.toLocaleDateString('ru-RU')}
 
