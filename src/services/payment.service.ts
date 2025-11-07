@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { YooCheckout } from '@a2seven/yoo-checkout';
 import { SubscriptionType, PaymentStatus } from '@prisma/client';
+import { NotificationService } from './notification.service';
 
 export interface CreatePaymentData {
   userId: string;
@@ -26,6 +27,8 @@ export class PaymentService {
   constructor(
     private readonly configService: ConfigService,
     private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => NotificationService))
+    private readonly notificationService: NotificationService,
   ) {
     const shopId = this.configService.get<string>('payment.yookassa.shopId');
     const secretKey = this.configService.get<string>(
@@ -166,6 +169,21 @@ export class PaymentService {
           payment.id,
           payment.amount,
         );
+
+        // Отправляем уведомление пользователю (отложенно, чтобы избежать циклической зависимости)
+        const period = payment.amount === 999 ? 'год' : 'месяц';
+        setTimeout(async () => {
+          try {
+            await this.notificationService.telegramBotService.sendMessageToUser(
+              parseInt(payment.userId),
+              `✅ *Оплата получена!*\n\n🎉 Поздравляем! Вы стали Premium на ${period}!\n\n💎 Теперь у вас:\n• Безлимитные задачи и привычки\n• Безлимитные запросы к ИИ\n• Расширенная аналитика\n• Приоритетная поддержка\n\nСпасибо за поддержку! 🚀`,
+              { parse_mode: 'Markdown' },
+            );
+            this.logger.log(`Sent premium notification to user ${payment.userId}`);
+          } catch (error) {
+            this.logger.error(`Failed to send premium notification to user ${payment.userId}:`, error);
+          }
+        }, 1000);
       }
 
       this.logger.log(`Payment ${paymentId} status updated to ${newStatus}`);
@@ -213,6 +231,7 @@ export class PaymentService {
           subscriptionStarted: now,
           subscriptionEnds,
           isTrialActive: false, // Отключаем пробный период
+          isPremium: true, // Устанавливаем флаг Premium
         },
       });
 

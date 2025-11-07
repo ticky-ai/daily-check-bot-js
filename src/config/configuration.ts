@@ -24,4 +24,10 @@ export default () => ({
   redis: {
     url: process.env.REDIS_URL,
   },
+  support: {
+    telegram: process.env.SUPPORT_TELEGRAM || '@Gexxx1',
+  },
+  admin: {
+    ids: process.env.ADMIN_IDS?.split(',').map((id) => id.trim()) || [],
+  },
 });
