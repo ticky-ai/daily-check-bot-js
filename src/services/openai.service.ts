@@ -73,21 +73,25 @@ export class OpenAIService {
 
   async getAIResponse(prompt: string): Promise<string> {
     try {
+      // Разделяем системный промпт и пользовательский вопрос
+      const promptParts = prompt.split('\n\nПользователь: ');
+      const systemPrompt = promptParts[0] || 'Ты персональный ассистент по продуктивности. Даешь краткие, практичные советы на русском языке. Отвечай дружелюбно и мотивирующе. Важно: всегда завершай свой ответ полностью, не обрывай на середине предложения или пункта.';
+      const userPrompt = promptParts[1] || prompt;
+
       const response = await this.openai.chat.completions.create({
         model: 'gpt-3.5-turbo',
         messages: [
           {
             role: 'system',
-            content:
-              'Ты персональный ассистент по продуктивности. Даешь краткие, практичные советы на русском языке. Отвечай дружелюбно и мотивирующе. Важно: всегда завершай свой ответ полностью, не обрывай на середине предложения или пункта.',
+            content: systemPrompt,
           },
           {
             role: 'user',
-            content: prompt,
+            content: userPrompt,
           },
         ],
-        temperature: 0.7,
-        max_tokens: 1500,
+        temperature: 0.8,
+        max_tokens: 2000,
       });
 
       const content = response.choices[0]?.message?.content?.trim();

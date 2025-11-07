@@ -24,7 +24,7 @@ export class NotificationService {
   constructor(
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramBotService))
-    private readonly telegramBotService: TelegramBotService,
+    public readonly telegramBotService: TelegramBotService,
     private readonly habitService: HabitService,
     private readonly openaiService: OpenAIService,
     private readonly taskService: TaskService,
@@ -552,6 +552,19 @@ export class NotificationService {
 
       for (const dependency of activeDependencies) {
         try {
+          // Дополнительная проверка: повторно проверяем статус перед отправкой
+          // Это предотвращает отправку уведомлений для зависимостей, которые были остановлены
+          const currentDependency = await this.prisma.dependencySupport.findUnique({
+            where: { id: dependency.id },
+          });
+
+          if (!currentDependency || currentDependency.status !== 'ACTIVE') {
+            this.logger.log(
+              `Skipping morning message for dependency ${dependency.id} - status is not ACTIVE`,
+            );
+            continue;
+          }
+
           const motivation = this.generateMorningMotivation(dependency.type);
 
           await this.telegramBotService.sendMessageToUser(
@@ -573,8 +586,12 @@ export class NotificationService {
           );
 
           // Обновляем статистику и отмечаем время отправки
-          await this.prisma.dependencySupport.update({
-            where: { id: dependency.id },
+          // Повторно проверяем статус перед обновлением
+          await this.prisma.dependencySupport.updateMany({
+            where: {
+              id: dependency.id,
+              status: 'ACTIVE', // Обновляем только если статус все еще ACTIVE
+            },
             data: {
               totalPromises: dependency.totalPromises + 1,
               lastMorningSent: new Date(), // Mark when we sent morning message
@@ -609,6 +626,19 @@ export class NotificationService {
 
       for (const dependency of activeDependencies) {
         try {
+          // Дополнительная проверка: повторно проверяем статус перед отправкой
+          // Это предотвращает отправку уведомлений для зависимостей, которые были остановлены
+          const currentDependency = await this.prisma.dependencySupport.findUnique({
+            where: { id: dependency.id },
+          });
+
+          if (!currentDependency || currentDependency.status !== 'ACTIVE') {
+            this.logger.log(
+              `Skipping evening message for dependency ${dependency.id} - status is not ACTIVE`,
+            );
+            continue;
+          }
+
           const checkMessage = this.generateEveningCheck(dependency.type);
 
           await this.telegramBotService.sendMessageToUser(
@@ -803,19 +833,9 @@ export class NotificationService {
               const userDate = new Date(nowInUserTz);
               const currentHour = userDate.getHours();
               const currentMinute = userDate.getMinutes();
-
-              const isToday = (date) => {
-              const today = new Date();
-              const compareDate = new Date(date);
-                
-              return compareDate.getDate() === today.getDate() &&
-                      compareDate.getMonth() === today.getMonth() &&
-                      compareDate.getFullYear() === today.getFullYear();
-              };
-
             if (currentHour === 21 && currentMinute < 10) {
                 const allTasksText = user.tasks.map((t) => t.title).join(', ');
-                const completedTask = user.tasks.filter((task) => task.status === 'COMPLETED' && isToday(task.completedAt))
+                const completedTask = user.tasks.filter((task) => task.status === 'COMPLETED')
                 const completedTasksText = completedTask.map((t) => t.title).join(', ');
                 const userTaskProgress = (completedTasksText.length / allTasksText.length) * 100
                 const allHabitsText = user.habits.map((h) => h.title).join(', ');
@@ -845,7 +865,7 @@ export class NotificationService {
                   [{ text: '📊 Мой прогресс', callback_data: 'my_progress' }],
                   [
                     {
-                      text: '🎯 Завтра начнем сначала!',
+                      text: '🏠 Главное меню',
                       callback_data: 'back_to_menu',
                     },
                   ],

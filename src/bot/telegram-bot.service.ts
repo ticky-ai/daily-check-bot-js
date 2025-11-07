@@ -11,7 +11,13 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Telegraf, session } from 'telegraf';
-import { User, Reminder, ReminderStatus } from '@prisma/client';
+// Use string literals for ReminderStatus to avoid TypeScript import issues
+const ReminderStatus = {
+  ACTIVE: 'ACTIVE' as const,
+  SNOOZED: 'SNOOZED' as const,
+  DISMISSED: 'DISMISSED' as const,
+  COMPLETED: 'COMPLETED' as const,
+};
 import { BotContext } from './bot-context.interface';
 import { UserService } from '../services/user.service';
 import { OpenAIService } from '../services/openai.service';
@@ -93,6 +99,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     private readonly habitService: HabitService,
     private readonly billingService: BillingService,
     private readonly aiContextService: AiContextService,
+    @Inject(forwardRef(() => PaymentService))
     private readonly paymentService: PaymentService,
     private readonly subscriptionService: SubscriptionService,
     private readonly prisma: PrismaService,
@@ -257,6 +264,350 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       await this.handleAudioMessage(ctx, 'voice');
     });
 
+    // Admin command
+    this.bot.command('admin', async (ctx) => {
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.from?.id.toString() || ctx.userId;
+
+      if (!adminIds.includes(userId)) {
+        await ctx.replyWithMarkdown('❌ У вас нет доступа к админ-панели.');
+        return;
+      }
+
+      try {
+        // Статистика пользователей
+        const totalUsers = await this.prisma.user.count();
+        const newUsersToday = await this.prisma.user.count({
+          where: {
+            createdAt: {
+              gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            },
+          },
+        });
+        const activeUsers = await this.prisma.user.count({
+          where: {
+            lastActivity: {
+              gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // последние 7 дней
+            },
+          },
+        });
+        const premiumUsers = await this.prisma.user.count({
+          where: {
+            subscriptionType: 'PREMIUM',
+          },
+        });
+        const recentPayments = await this.prisma.payment.count({
+          where: {
+            status: 'COMPLETED',
+            createdAt: {
+              gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // последние 30 дней
+            },
+          },
+        });
+
+        const message = `👑 *Админ-панель*\n\n📊 **Статистика:**\n👥 Всего пользователей: ${totalUsers}\n🆕 Новых сегодня: ${newUsersToday}\n🟢 Активных (7 дней): ${activeUsers}\n💎 Premium: ${premiumUsers}\n💰 Платежей (30 дней): ${recentPayments}`;
+
+        await ctx.replyWithMarkdown(message, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📊 Детальная статистика', callback_data: 'admin_stats' }],
+              [{ text: '👥 Новые пользователи', callback_data: 'admin_new_users' }],
+              [{ text: '💎 Premium пользователи', callback_data: 'admin_premium' }],
+              [{ text: '💰 Платежи', callback_data: 'admin_payments' }],
+            ],
+          },
+        });
+      } catch (error) {
+        this.logger.error('Error in admin command:', error);
+        await ctx.replyWithMarkdown('❌ Ошибка при загрузке статистики.');
+      }
+    });
+
+    // Admin handlers
+    this.bot.action('admin_stats', async (ctx) => {
+      await ctx.answerCbQuery();
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.userId;
+
+      if (!adminIds.includes(userId)) {
+        await ctx.replyWithMarkdown('❌ У вас нет доступа.');
+        return;
+      }
+
+      try {
+        const totalUsers = await this.prisma.user.count();
+        const usersWithTasks = await this.prisma.user.count({
+          where: { tasks: { some: {} } },
+        });
+        const usersWithHabits = await this.prisma.user.count({
+          where: { habits: { some: {} } },
+        });
+        const totalTasks = await this.prisma.task.count();
+        const totalHabits = await this.prisma.habit.count();
+
+        const message = `📊 *Детальная статистика*\n\n👥 Всего пользователей: ${totalUsers}\n📝 Пользователей с задачами: ${usersWithTasks}\n🎯 Пользователей с привычками: ${usersWithHabits}\n📋 Всего задач: ${totalTasks}\n🔄 Всего привычек: ${totalHabits}`;
+
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+
+        await this.safeEditOrReply(ctx, message, keyboard);
+      } catch (error) {
+        this.logger.error('Error in admin_stats:', error);
+        const errorMessage = '❌ Ошибка при загрузке статистики.';
+        const errorKeyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+        await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
+      }
+    });
+
+    this.bot.action('admin_new_users', async (ctx) => {
+      await ctx.answerCbQuery();
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.userId;
+
+      if (!adminIds.includes(userId)) {
+        await ctx.replyWithMarkdown('❌ У вас нет доступа.');
+        return;
+      }
+
+      try {
+        const newUsers = await this.prisma.user.findMany({
+          where: {
+            createdAt: {
+              gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        });
+
+        let message = `👥 *Новые пользователи \\(7 дней\\)*\n\n`;
+        if (newUsers.length === 0) {
+          message += 'Нет новых пользователей.';
+        } else {
+          newUsers.forEach((user, idx) => {
+            const username = user.username ? `@${this.escapeMarkdown(user.username)}` : 'нет';
+            const displayName = this.escapeMarkdown(user.firstName || 'Без имени');
+            const date = user.createdAt.toLocaleDateString('ru-RU');
+            message += `${idx + 1}\\. ${displayName} \\(${username}\\) - ${date}\n`;
+          });
+        }
+
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+
+        await this.safeEditOrReply(ctx, message, keyboard);
+      } catch (error) {
+        this.logger.error('Error in admin_new_users:', error);
+        const errorMessage = '❌ Ошибка при загрузке новых пользователей.';
+        const errorKeyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+        await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
+      }
+    });
+
+    this.bot.action('admin_premium', async (ctx) => {
+      await ctx.answerCbQuery();
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.userId;
+
+      if (!adminIds.includes(userId)) {
+        await ctx.replyWithMarkdown('❌ У вас нет доступа.');
+        return;
+      }
+
+      try {
+        const premiumUsers = await this.prisma.user.findMany({
+          where: { subscriptionType: 'PREMIUM' },
+          orderBy: { subscriptionStarted: 'desc' },
+          take: 10,
+        });
+
+        let message = `💎 *Premium пользователи*\n\n`;
+        if (premiumUsers.length === 0) {
+          message += 'Нет Premium пользователей.';
+        } else {
+          premiumUsers.forEach((user, idx) => {
+            const username = user.username ? `@${this.escapeMarkdown(user.username)}` : 'нет';
+            const displayName = this.escapeMarkdown(user.firstName || 'Без имени');
+            const endsAt = user.subscriptionEnds
+              ? user.subscriptionEnds.toLocaleDateString('ru-RU')
+              : 'не указано';
+            message += `${idx + 1}\\. ${displayName} \\(${username}\\) - до ${endsAt}\n`;
+          });
+        }
+
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+
+        await this.safeEditOrReply(ctx, message, keyboard);
+      } catch (error) {
+        this.logger.error('Error in admin_premium:', error);
+        const errorMessage = '❌ Ошибка при загрузке Premium пользователей.';
+        const errorKeyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+        await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
+      }
+    });
+
+    this.bot.action('admin_payments', async (ctx) => {
+      await ctx.answerCbQuery();
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.userId;
+
+      if (!adminIds.includes(userId)) {
+        await ctx.replyWithMarkdown('❌ У вас нет доступа.');
+        return;
+      }
+
+      try {
+        const payments = await this.prisma.payment.findMany({
+          where: {
+            status: 'COMPLETED',
+            createdAt: {
+              gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          include: { user: true },
+        });
+
+        let message = `💰 *Платежи \\(30 дней\\)*\n\n`;
+        if (payments.length === 0) {
+          message += 'Нет платежей.';
+        } else {
+          const totalAmount = payments.reduce((sum, p) => sum + p.amount, 0);
+          message += `Всего: ${totalAmount}₽\n\n`;
+          payments.forEach((payment, idx) => {
+            const displayName = this.escapeMarkdown(payment.user.firstName || 'Без имени');
+            const date = payment.createdAt.toLocaleDateString('ru-RU');
+            message += `${idx + 1}\\. ${payment.amount}₽ - ${displayName} - ${date}\n`;
+          });
+        }
+
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+
+        await this.safeEditOrReply(ctx, message, keyboard);
+      } catch (error) {
+        this.logger.error('Error in admin_payments:', error);
+        const errorMessage = '❌ Ошибка при загрузке платежей.';
+        const errorKeyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+        await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
+      }
+    });
+
+    this.bot.action('admin_back', async (ctx) => {
+      await ctx.answerCbQuery();
+      // Повторно вызываем команду admin
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.from?.id.toString() || ctx.userId;
+
+      if (!adminIds.includes(userId)) {
+        await ctx.replyWithMarkdown('❌ У вас нет доступа к админ-панели.');
+        return;
+      }
+
+      try {
+        const totalUsers = await this.prisma.user.count();
+        const newUsersToday = await this.prisma.user.count({
+          where: {
+            createdAt: {
+              gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            },
+          },
+        });
+        const activeUsers = await this.prisma.user.count({
+          where: {
+            lastActivity: {
+              gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+            },
+          },
+        });
+        const premiumUsers = await this.prisma.user.count({
+          where: {
+            subscriptionType: 'PREMIUM',
+          },
+        });
+        const recentPayments = await this.prisma.payment.count({
+          where: {
+            status: 'COMPLETED',
+            createdAt: {
+              gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+            },
+          },
+        });
+
+        const message = `👑 *Админ-панель*\n\n📊 **Статистика:**\n👥 Всего пользователей: ${totalUsers}\n🆕 Новых сегодня: ${newUsersToday}\n🟢 Активных (7 дней): ${activeUsers}\n💎 Premium: ${premiumUsers}\n💰 Платежей (30 дней): ${recentPayments}`;
+
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📊 Детальная статистика', callback_data: 'admin_stats' }],
+              [{ text: '👥 Новые пользователи', callback_data: 'admin_new_users' }],
+              [{ text: '💎 Premium пользователи', callback_data: 'admin_premium' }],
+              [{ text: '💰 Платежи', callback_data: 'admin_payments' }],
+            ],
+          },
+        };
+
+        await this.safeEditOrReply(ctx, message, keyboard);
+      } catch (error) {
+        this.logger.error('Error in admin_back:', error);
+        const errorMessage = '❌ Ошибка при загрузке статистики.';
+        const errorKeyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад', callback_data: 'admin_back' }],
+            ],
+          },
+        };
+        await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
+      }
+    });
+
     // Help command
     this.bot.help(async (ctx) => {
       await ctx.replyWithMarkdown(`
@@ -417,24 +768,19 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       }
     });
 
-    // Test notification command
-    this.bot.command('testnotify', async (ctx) => {
-      ctx.session.aiChatMode = false
+    // Test notification command and action
+    const sendTestNotification = async (ctx: BotContext) => {
       try {
-        const userId = ctx.from.id.toString();
+        const userId = ctx.userId;
 
         // Find user's first habit
         const habit = await this.prisma.habit.findFirst({
           where: { userId, isActive: true },
         });
 
-        if (!habit) {
-          await ctx.reply('❌ У вас нет активных привычек для тестирования.');
-          return;
-        }
-
-        // Send test notification
-        const message = `⏰ *Тестовое напоминание*\n\n🎯 ${habit.title}\n\nЭто пример уведомления о привычке!`;
+        if (habit) {
+          // Send test notification with habit example
+          const message = `⏰ *Тестовое напоминание*\n\n🎯 ${habit.title}\n\nЭто пример уведомления о привычке!\n\n💡 Так выглядят уведомления, которые вы будете получать.`;
         const keyboard = {
           inline_keyboard: [
             [
@@ -457,21 +803,62 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
                 callback_data: `skip_habit_${String(habit.id).slice(0, 20)}`,
               },
             ],
-          ],
-        };
+              [
+                {
+                  text: '🔔 Настройки уведомлений',
+                  callback_data: 'settings_notifications',
+                },
+              ],
+            ],
+          };
 
-        await ctx.reply(message, {
-          parse_mode: 'Markdown',
-          reply_markup: keyboard,
-        });
+          await ctx.replyWithMarkdown(message, keyboard);
+        } else {
+          // Send generic test notification if no habits
+          const message = `⏰ *Тестовое уведомление*\n\n🎯 Пример: "Пить воду каждый час"\n\n💡 Это пример уведомления о привычке!\n\n📝 Когда вы создадите привычку и настроите напоминания, вы будете получать такие уведомления в указанное время.`;
+          const keyboard = {
+            inline_keyboard: [
+              [
+                {
+                  text: '✅ Выполнил',
+                  callback_data: 'back_to_menu',
+                },
+                {
+                  text: '⏰ Отложить на 15 мин',
+                  callback_data: 'back_to_menu',
+                },
+              ],
+              [
+                {
+                  text: '🎯 Добавить привычку',
+                  callback_data: 'habits_add',
+                },
+                {
+                  text: '🔔 Настройки уведомлений',
+                  callback_data: 'settings_notifications',
+                },
+              ],
+            ],
+          };
 
-        this.logger.log(
-          `Test notification sent to user ${userId} for habit ${habit.id}`,
-        );
+          await ctx.replyWithMarkdown(message, keyboard);
+        }
+
+        this.logger.log(`Test notification sent to user ${userId}`);
       } catch (error) {
         this.logger.error('Error in test notification:', error);
-        await ctx.reply('❌ Ошибка при отправке тестового уведомления.');
+        await ctx.replyWithMarkdown('❌ Ошибка при отправке тестового уведомления.');
       }
+    };
+
+    this.bot.command('testnotify', async (ctx) => {
+      ctx.session.aiChatMode = false;
+      await sendTestNotification(ctx);
+    });
+
+    this.bot.action('test_notification', async (ctx) => {
+      await ctx.answerCbQuery('🧪 Отправляю тестовое уведомление...');
+      await sendTestNotification(ctx);
     });
 
     // Show active reminders command
@@ -602,6 +989,18 @@ ${statusMessage}
     });
 
     // Info command - показывает информацию о мотивационных сообщениях
+    this.bot.command('myid', async (ctx) => {
+      try {
+        const userId = ctx.from?.id || ctx.userId;
+        await ctx.replyWithMarkdown(
+          `🆔 *Ваш Telegram ID:*\n\n\`${userId}\``,
+        );
+      } catch (error) {
+        this.logger.error('Error in myid command:', error);
+        await ctx.reply('❌ Произошла ошибка при получении ID.');
+      }
+    });
+
     this.bot.command('info', async (ctx) => {
       ctx.session.aiChatMode = false
       await this.showSystemInfo(ctx);
@@ -615,25 +1014,34 @@ ${statusMessage}
 
     this.bot.command('debug', async (ctx) => {
       try {
-        this.userService.updateUser('73952802', {
-        isTrialActive: true,
-        isPremium: true,
-        subscriptionType: 'PREMIUM', 
-      });
       // Get all users with timezone and active tasks/habits
       const users = await this.prisma.user.findMany({
+        where: {
+          timezone: { not: null },
+          id: '53527242',
+          OR: [
+            { habits: { some: { isActive: true } } },
+            { tasks: { some: {} } },
+          ],
+        },
+        include: {
+          habits: { where: { isActive: true } },
+          tasks: true,
+        },
       });
       for (const user of users) {
         const userTimezone = user.timezone;
-        console.log(user)
+        console.log(user.habits)
         if (!userTimezone) {
                 this.logger.log(`Skipping user ${user.id}, no timezone set`);
                 continue;
               }
        
         const nowInUserTz = new Date().toLocaleString("en-US", { timeZone: userTimezone });
- 
 
+        const completedHabbits = user.habits.filter((habit) => this.habitService.isCompletedTodayTZ(habit, nowInUserTz))
+
+        console.log(completedHabbits)
       }
     } catch(error) {
       console.error(error)
@@ -892,6 +1300,74 @@ ${statusMessage}
         return;
       }
 
+      // Handle editing profile name
+      if (ctx.session.step === 'editing_profile_name') {
+        const newName = ctx.message.text?.trim();
+        if (!newName || newName.length < 1) {
+          await ctx.replyWithMarkdown(
+            '⚠️ Имя не может быть пустым. Попробуйте ещё раз:',
+          );
+          return;
+        }
+
+        try {
+          await this.userService.updateUser(ctx.userId, {
+            firstName: newName,
+          });
+
+          ctx.session.step = undefined;
+          await ctx.replyWithMarkdown(
+            `✅ Имя обновлено на "${newName}"`,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '⬅️ Назад к редактированию', callback_data: 'edit_profile' }],
+                  [{ text: '👤 Профиль', callback_data: 'user_profile' }],
+                ],
+              },
+            },
+          );
+        } catch (error) {
+          this.logger.error('Error updating profile name:', error);
+          await ctx.replyWithMarkdown('❌ Ошибка при обновлении имени. Попробуйте ещё раз.');
+        }
+        return;
+      }
+
+      // Handle editing profile city
+      if (ctx.session.step === 'editing_profile_city') {
+        const newCity = ctx.message.text?.trim();
+        if (!newCity || newCity.length < 1) {
+          await ctx.replyWithMarkdown(
+            '⚠️ Название города не может быть пустым. Попробуйте ещё раз:',
+          );
+          return;
+        }
+
+        try {
+          await this.userService.updateUser(ctx.userId, {
+            city: newCity,
+          });
+
+          ctx.session.step = undefined;
+          await ctx.replyWithMarkdown(
+            `✅ Город обновлен на "${newCity}"`,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '⬅️ Назад к редактированию', callback_data: 'edit_profile' }],
+                  [{ text: '👤 Профиль', callback_data: 'user_profile' }],
+                ],
+              },
+            },
+          );
+        } catch (error) {
+          this.logger.error('Error updating profile city:', error);
+          await ctx.replyWithMarkdown('❌ Ошибка при обновлении города. Попробуйте ещё раз.');
+        }
+        return;
+      }
+
       // Handle editing task title flow
       if (
         ctx.session.step === 'editing_task_title' &&
@@ -1081,6 +1557,40 @@ ${statusMessage}
         const habitName = ctx.message.text;
 
         try {
+          // Проверяем лимит ПЕРЕД созданием привычки
+          const habitLimitCheck = await this.subscriptionService.checkLimit(
+            ctx.userId,
+            'habits',
+          );
+
+          if (!habitLimitCheck.allowed) {
+            const limitMessage = this.subscriptionService.getLimitMessage(
+              'habits',
+              habitLimitCheck.current,
+              habitLimitCheck.limit,
+            );
+            await ctx.replyWithMarkdown(limitMessage, {
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    {
+                      text: '💎 Получить Premium',
+                      callback_data: 'get_premium',
+                    },
+                  ],
+                  [
+                    {
+                      text: '📊 Мои лимиты',
+                      callback_data: 'subscription_status',
+                    },
+                  ],
+                  [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+                ],
+              },
+            });
+            return;
+          }
+
           // Создаем привычку в базе данных и получаем запись
           const habit = await this.habitService.createHabit({
             userId: ctx.userId,
@@ -1094,9 +1604,9 @@ ${statusMessage}
           await this.billingService.incrementUsage(ctx.userId, 'dailyHabits');
 
           // Получаем текущее использование для отображения
-          const usageInfo = await this.billingService.checkUsageLimit(
+          const usageInfo = await this.subscriptionService.checkLimit(
             ctx.userId,
-            'dailyHabits',
+            'habits',
           );
 
           // Сбрасываем шаг
@@ -1122,7 +1632,7 @@ ${statusMessage}
 🎯 **Название:** ${habitName}
 📅 **Описание:** каждый день
 
-📊 **Использовано:** ${usageInfo.current}${usageInfo.limit === -1 ? '' : `/${usageInfo.limit}`} привычек
+📊 **Использовано:** ${usageInfo.current}${usageInfo.limit === -1 ? '/♾️' : `/${usageInfo.limit}`} привычек${usageInfo.limit !== -1 ? ` (осталось: ${usageInfo.remaining})` : ''}
 
 💡 **Подсказка:** Вы можете настроить напоминания для этой привычки в меню привычек.
         `,
@@ -1143,12 +1653,6 @@ ${statusMessage}
                       {
                         text: '🏠 Главное меню',
                         callback_data: 'back_to_menu',
-                      },
-                    ],
-                    [
-                      {
-                        text: '❓ Что еще я умею?',
-                        callback_data: 'faq_support',
                       },
                     ],
                   ],
@@ -1212,7 +1716,7 @@ ${statusMessage}
           }
 
           // Create the habit using the habit service
-          await this.habitService.createHabit({
+          const habit = await this.habitService.createHabit({
             userId: ctx.userId,
             title: habitTitle,
             description: undefined,
@@ -1220,12 +1724,23 @@ ${statusMessage}
             targetCount: 1,
           });
 
+          // Увеличиваем счетчик использования
+          await this.billingService.incrementUsage(ctx.userId, 'dailyHabits');
+
+          // Получаем обновленную информацию об использовании
+          const usageInfo = await this.subscriptionService.checkLimit(
+            ctx.userId,
+            'habits',
+          );
+
           ctx.session.step = undefined;
           ctx.session.pendingAction = undefined;
 
           await ctx.replyWithMarkdown(
             `
 ✅ *Привычка "${habitTitle}" успешно добавлена!*
+
+📊 **Использовано:** ${usageInfo.current}${usageInfo.limit === -1 ? '/♾️' : `/${usageInfo.limit}`} привычек${usageInfo.limit !== -1 ? ` (осталось: ${usageInfo.remaining})` : ''}
 
 🎯 Теперь вы можете отслеживать её выполнение в разделе "Мои привычки".
 
@@ -1365,7 +1880,8 @@ ${statusMessage}
         await this.askForTimezone(ctx);
       } else {
         ctx.session.step = 'adding_habit';
-        await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
           '🔄 *Добавление привычки*\n\n⬇️ *Выберите готовый пример или введите название привычки в поле для ввода ниже*',
           {
             reply_markup: {
@@ -1430,12 +1946,27 @@ ${statusMessage}
       await this.createHabitFromExample(ctx, habitName);
     });
 
+    // Handle habit examples - workout
+    this.bot.action('habit_example_workout', async (ctx) => {
+      await ctx.answerCbQuery();
+      const habitName = 'Заниматься спортом';
+      await this.createHabitFromExample(ctx, habitName);
+    });
+
+    // Handle habit examples - reading books daily
+    this.bot.action('habit_example_reading', async (ctx) => {
+      await ctx.answerCbQuery();
+      const habitName = 'Читать книги каждый день';
+      await this.createHabitFromExample(ctx, habitName);
+    });
+
     // Handle custom habit input
     this.bot.action('habit_custom_input', async (ctx) => {
       await ctx.answerCbQuery();
       ctx.session.step = 'adding_habit'; // Add this line!
-      await ctx.editMessageTextWithMarkdown(
-        '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычк, которую хотите отслеживать, в поле для ввода ниже*',
+      await this.safeEditOrReply(
+        ctx,
+        '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычки, которую хотите отслеживать, в поле для ввода ниже*',
         {
           reply_markup: {
             inline_keyboard: [
@@ -1848,14 +2379,17 @@ ${statusMessage}
           [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }],
         ],
       };
-      await ctx.editMessageTextWithMarkdown('➕ *Что хотите добавить?*', {
-        reply_markup: keyboard,
-      });
+      await this.safeEditOrReply(
+        ctx,
+        '➕ *Что хотите добавить?*',
+        keyboard,
+      );
     });
 
     this.bot.action('voice_message', async (ctx) => {
       await ctx.answerCbQuery();
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `🎙️ *Озвучьте задачу*
 
 Вы можете продиктовать:
@@ -1890,7 +2424,7 @@ ${statusMessage}
 
     this.bot.action('my_progress', async (ctx) => {
       await ctx.answerCbQuery();
-      await this.showMainStatistics(ctx);
+      await this.showProgressMenu(ctx);
     });
 
     // New handlers for updated main menu
@@ -1903,8 +2437,8 @@ ${statusMessage}
         await this.askForTimezone(ctx);
       } else {
         ctx.session.step = 'adding_habit';
-        try {
-          await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
             '🔄 *Добавление привычки*\n\n⬇️  *Выберите готовый пример или введите название привычки в поле для ввода ниже*',
             {
               reply_markup: {
@@ -1944,49 +2478,6 @@ ${statusMessage}
               },
             },
           );
-        } catch (error) {
-          // If editing fails (e.g., trying to edit a photo message), send a new message
-          await ctx.replyWithMarkdown(
-            '🔄 *Добавление привычки*\n\n⬇️ *Выберите готовый пример или введите название привычки в поле для ввода ниже*',
-            {
-              reply_markup: {
-                inline_keyboard: [
-                  [
-                    {
-                      text: '💧 Пить воду каждый день по 2 литра',
-                      callback_data: 'habit_example_water',
-                    },
-                  ],
-                  [
-                    {
-                      text: '😴 Ложиться спать до 23:00',
-                      callback_data: 'habit_example_sleep',
-                    },
-                  ],
-                  [
-                    {
-                      text: '🏃‍♂️ Заниматься спортом',
-                      callback_data: 'habit_example_workout',
-                    },
-                  ],
-                  [
-                    {
-                      text: '📚 Читать книги каждый день',
-                      callback_data: 'habit_example_reading',
-                    },
-                  ],
-                  [
-                    {
-                      text: '📝 Ввести свою привычку',
-                      callback_data: 'habit_custom_input',
-                    },
-                  ],
-                  [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }],
-                ],
-              },
-            },
-          );
-        }
       }
     });
 
@@ -2003,10 +2494,9 @@ ${statusMessage}
     this.bot.action('ai_chat', async (ctx) => {
         try {
           await ctx.answerCbQuery();
-          await this.startAIChat(ctx);
+          await this.showAIChatMenu(ctx);
         } catch (error) {
           console.error('Error in ai_chat action:', error);
-          // Optionally, notify the user that an error occurred
           await ctx.reply('🚫 Произошла ошибка. Попробуйте позже или обратитесь к администратору.').catch(console.error);
         }
     });
@@ -2041,23 +2531,11 @@ ${statusMessage}
           ],
         ],
       };
-      try {
-        await ctx.editMessageText(
+      await this.safeEditOrReply(
+        ctx,
           '🚀 *Дополнительные функции*\n\nВыберите интересующий раздел:',
-          {
-            parse_mode: 'Markdown',
-            reply_markup: keyboard,
-          },
-        );
-      } catch (error) {
-        // If editing fails (e.g., trying to edit a photo message), send a new message
-        await ctx.replyWithMarkdown(
-          '🚀 *Дополнительные функции*\n\nВыберите интересующий раздел:',
-          {
-            reply_markup: keyboard,
-          },
-        );
-      }
+        keyboard,
+      );
     });
 
     // Additional functions handlers
@@ -2069,35 +2547,90 @@ ${statusMessage}
     this.bot.action('user_settings', async (ctx) => {
       try {
         await ctx.answerCbQuery();
+        
+        if (!ctx.userId) {
+          this.logger.error('ctx.userId is undefined in user_settings');
+          await ctx.reply('❌ Ошибка: не удалось определить пользователя. Попробуйте перезапустить бота командой /start');
+          return;
+        }
+
+        this.logger.log(`Loading settings for user: ${ctx.userId}`);
         const user = await this.userService.findByTelegramId(ctx.userId);
+
+        if (!user) {
+          this.logger.error(`User not found for userId: ${ctx.userId}`);
+          await this.safeEditOrReply(
+            ctx,
+            '❌ Пользователь не найден. Попробуйте перезапустить бота командой /start',
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+                ],
+              },
+            },
+          );
+          return;
+        }
+
+        // Экранируем специальные символы markdown для безопасного отображения
+        const escapeMarkdown = (text: string): string => {
+          if (!text) return '';
+          return text
+            .replace(/\_/g, '\\_')
+            .replace(/\*/g, '\\*')
+            .replace(/\[/g, '\\[')
+            .replace(/\]/g, '\\]')
+            .replace(/\(/g, '\\(')
+            .replace(/\)/g, '\\)')
+            .replace(/\~/g, '\\~')
+            .replace(/\`/g, '\\`')
+            .replace(/\>/g, '\\>')
+            .replace(/\#/g, '\\#')
+            .replace(/\+/g, '\\+')
+            .replace(/\-/g, '\\-')
+            .replace(/\=/g, '\\=')
+            .replace(/\|/g, '\\|')
+            .replace(/\{/g, '\\{')
+            .replace(/\}/g, '\\}')
+            .replace(/\./g, '\\.')
+            .replace(/\!/g, '\\!');
+        };
+
+        const safeText = (text: string | null | undefined, defaultValue: string = ''): string => {
+          return escapeMarkdown(text || defaultValue);
+        };
 
         const settingsText = `⚙️ *Настройки пользователя*
 
-👤 **Профиль:**
-🆔 ID: ${user.id || 'Неизвестно'}
-👤 Имя: ${user.firstName || 'Не указано'}
-📧 Username: ${user.username ? `@${user.username}` : 'Не указано'}
+👤 *Профиль:*
+🆔 ID: ${safeText(user.id, 'Неизвестно')}
+👤 Имя: ${safeText(user.firstName, 'Не указано')}
+📧 Username: ${user.username ? '@' + safeText(user.username) : 'Не указано'}
 
-🔔 **Уведомления:**
+🔔 *Уведомления:*
 📱 Уведомления: ${user.notifications !== false ? '✅ Включены' : '❌ Отключены'}
-⏰ Время напоминаний: ${user.reminderTime || 'Не установлено'}
+⏰ Время напоминаний: ${safeText(user.reminderTime, 'Не установлено')}
 📊 Еженедельная сводка: ${user.weeklySummary !== false ? '✅ Включена' : '❌ Отключена'}
 
-🎨 **Интерфейс:**
-🎭 Тема: ${user.theme || 'По умолчанию'}
+🎨 *Интерфейс:*
+🎭 Тема: ${safeText(user.theme, 'По умолчанию')}
 ✨ Анимации: ${user.showAnimations !== false ? '✅ Включены' : '❌ Отключены'}
 🎙️ Голосовые команды: ${user.voiceCommands !== false ? '✅ Включены' : '❌ Отключены'}
 
-🤖 **AI и режимы:**
+🤖 *AI и режимы:*
 🧠 AI режим: ${user.aiMode !== false ? '✅ Включен' : '❌ Отключен'}
 🔧 Режим разработки: ${user.dryMode === true ? '✅ Включен' : '❌ Отключен'}
 
-🔒 **Приватность:**
-👁️ Уровень приватности: ${user.privacyLevel || 'Обычный'}
-🌍 Часовой пояс: ${user.timezone || 'Не установлен'}
-🏙️ Город: ${user.city || 'Не указан'}`;
+🔒 *Приватность:*
+👁️ Уровень приватности: ${safeText(user.privacyLevel, 'Обычный')}
+🌍 Часовой пояс: ${safeText(user.timezone, 'Не установлен')}
+🏙️ Город: ${safeText(user.city, 'Не указан')}`;
 
-        await ctx.editMessageText(settingsText, {
+        await this.safeEditOrReply(
+          ctx,
+          settingsText,
+          {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
@@ -2116,21 +2649,31 @@ ${statusMessage}
               [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
             ],
           },
-        });
+          },
+        );
       } catch (error) {
         this.logger.error(`Error in user_settings handler: ${error}`);
-        await ctx.answerCbQuery('❌ Произошла ошибка');
-        await ctx.editMessageText(
-          '❌ Произошла ошибка при загрузке настроек. Попробуйте позже.',
+        this.logger.error(`Error stack: ${error instanceof Error ? error.stack : 'No stack trace'}`);
+        await ctx.answerCbQuery('❌ Произошла ошибка').catch(() => {});
+        await this.safeEditOrReply(
+          ctx,
+          `❌ *Произошла ошибка при загрузке настроек*
+
+${error instanceof Error ? error.message : 'Неизвестная ошибка'}
+
+Попробуйте позже или обратитесь в поддержку.`,
           {
             reply_markup: {
               inline_keyboard: [
+                [{ text: '🔄 Попробовать снова', callback_data: 'user_settings' }],
                 [{ text: '⬅️ Назад', callback_data: 'more_functions' }],
                 [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
               ],
             },
           },
-        );
+        ).catch((err) => {
+          this.logger.error('Error sending error message:', err);
+        });
       }
     });
 
@@ -2179,6 +2722,18 @@ ${statusMessage}
                 ],
                 [
                   {
+                    text: '🧪 Тест уведомления',
+                    callback_data: 'test_notification',
+                  },
+                ],
+                [
+                  {
+                    text: '🚫 Отключить все напоминания',
+                    callback_data: 'disable_all_reminders',
+                  },
+                ],
+                [
+                  {
                     text: '⬅️ Назад к настройкам',
                     callback_data: 'user_settings',
                   },
@@ -2191,7 +2746,8 @@ ${statusMessage}
       } catch (error) {
         this.logger.error(`Error in settings_notifications handler: ${error}`);
         await ctx.answerCbQuery('❌ Произошла ошибка');
-        await ctx.editMessageText(
+        await this.safeEditOrReply(
+          ctx,
           '❌ Произошла ошибка при загрузке настроек уведомлений.',
           {
             reply_markup: {
@@ -2215,7 +2771,8 @@ ${statusMessage}
         await ctx.answerCbQuery();
         const user = await this.userService.findByTelegramId(ctx.userId);
 
-        await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
           `
 🎨 *Настройки интерфейса*
 
@@ -2283,7 +2840,8 @@ ${statusMessage}
         await ctx.answerCbQuery();
         const user = await this.userService.findByTelegramId(ctx.userId);
 
-        await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
           `
 🤖 *AI настройки*
 
@@ -2343,16 +2901,63 @@ ${statusMessage}
         await ctx.answerCbQuery();
         const user = await this.userService.findByTelegramId(ctx.userId);
 
+        if (!user) {
+          this.logger.error(`User not found for userId: ${ctx.userId}`);
+          await this.safeEditOrReply(
+            ctx,
+            '❌ Пользователь не найден. Попробуйте перезапустить бота командой /start',
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+                ],
+              },
+            },
+          );
+          return;
+        }
+
+        // Экранируем специальные символы markdown для безопасного отображения
+        const escapeMarkdown = (text: string): string => {
+          if (!text) return '';
+          return text
+            .replace(/\_/g, '\\_')
+            .replace(/\*/g, '\\*')
+            .replace(/\[/g, '\\[')
+            .replace(/\]/g, '\\]')
+            .replace(/\(/g, '\\(')
+            .replace(/\)/g, '\\)')
+            .replace(/\~/g, '\\~')
+            .replace(/\`/g, '\\`')
+            .replace(/\>/g, '\\>')
+            .replace(/\#/g, '\\#')
+            .replace(/\+/g, '\\+')
+            .replace(/\-/g, '\\-')
+            .replace(/\=/g, '\\=')
+            .replace(/\|/g, '\\|')
+            .replace(/\{/g, '\\{')
+            .replace(/\}/g, '\\}')
+            .replace(/\./g, '\\.')
+            .replace(/\!/g, '\\!');
+        };
+
+        const safeText = (text: string | null | undefined, defaultValue: string = ''): string => {
+          return escapeMarkdown(text || defaultValue);
+        };
+
         const privacyText = `🔒 *Настройки приватности*
 
 Текущие настройки:
-👁️ Уровень приватности: ${user.privacyLevel || 'Обычный'}
-🌍 Часовой пояс: ${user.timezone || 'Не установлен'}
-🏙️ Город: ${user.city || 'Не указан'}
+👁️ Уровень приватности: ${safeText(user.privacyLevel, 'Обычный')}
+🌍 Часовой пояс: ${safeText(user.timezone, 'Не установлен')}
+🏙️ Город: ${safeText(user.city, 'Не указан')}
 
 💡 Уровень приватности влияет на видимость вашего профиля другим пользователям.`;
 
-        await ctx.editMessageText(privacyText, {
+        await this.safeEditOrReply(
+          ctx,
+          privacyText,
+          {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
@@ -2380,18 +2985,141 @@ ${statusMessage}
         });
       } catch (error) {
         this.logger.error(`Error in settings_privacy handler: ${error}`);
-        await ctx.answerCbQuery('❌ Произошла ошибка');
-        await ctx.editMessageText(
-          '❌ Произошла ошибка при загрузке настроек приватности.',
+        this.logger.error(`Error stack: ${error instanceof Error ? error.stack : 'No stack trace'}`);
+        await ctx.answerCbQuery('❌ Произошла ошибка').catch(() => {});
+        await this.safeEditOrReply(
+          ctx,
+          `❌ *Произошла ошибка при загрузке настроек приватности*
+
+${error instanceof Error ? error.message : 'Неизвестная ошибка'}
+
+Попробуйте позже или обратитесь в поддержку.`,
           {
             reply_markup: {
               inline_keyboard: [
+                [{ text: '🔄 Попробовать снова', callback_data: 'settings_privacy' }],
                 [{ text: '⬅️ Назад', callback_data: 'user_settings' }],
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        ).catch((err) => {
+          this.logger.error('Error sending error message:', err);
+        });
+      }
+    });
+
+    // Handle change privacy level
+    this.bot.action('change_privacy_level', async (ctx) => {
+      await ctx.answerCbQuery();
+      try {
+        await this.safeEditOrReply(
+          ctx,
+          `👁️ *Выберите уровень приватности:*
+
+**Public (Публичный)** - ваш профиль виден другим пользователям
+**Private (Приватный)** - ваш профиль скрыт от других пользователей`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '🌐 Public (Публичный)',
+                    callback_data: 'set_privacy_public',
+                  },
+                ],
+                [
+                  {
+                    text: '🔒 Private (Приватный)',
+                    callback_data: 'set_privacy_private',
+                  },
+                ],
+                [
+                  {
+                    text: '⬅️ Назад к настройкам приватности',
+                    callback_data: 'settings_privacy',
+                  },
+                ],
               ],
             },
           },
         );
+      } catch (error) {
+        this.logger.error(`Error in change_privacy_level handler: ${error}`);
+        await ctx.answerCbQuery('❌ Произошла ошибка');
       }
+    });
+
+    // Handle set privacy level
+    this.bot.action('set_privacy_public', async (ctx) => {
+      await ctx.answerCbQuery();
+      try {
+        await this.userService.updateUser(ctx.userId, {
+          privacyLevel: 'public',
+        });
+        await this.safeEditOrReply(
+          ctx,
+          `✅ *Уровень приватности изменен*
+
+👁️ Уровень приватности: **Public (Публичный)**
+
+Ваш профиль теперь виден другим пользователям.`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '⬅️ Назад к настройкам приватности',
+                    callback_data: 'settings_privacy',
+                  },
+                ],
+              ],
+            },
+          },
+        );
+      } catch (error) {
+        this.logger.error(`Error in set_privacy_public handler: ${error}`);
+        await ctx.answerCbQuery('❌ Произошла ошибка');
+      }
+    });
+
+    this.bot.action('set_privacy_private', async (ctx) => {
+      await ctx.answerCbQuery();
+      try {
+        await this.userService.updateUser(ctx.userId, {
+          privacyLevel: 'private',
+        });
+        await this.safeEditOrReply(
+          ctx,
+          `✅ *Уровень приватности изменен*
+
+🔒 Уровень приватности: **Private (Приватный)**
+
+Ваш профиль теперь скрыт от других пользователей.`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '⬅️ Назад к настройкам приватности',
+                    callback_data: 'settings_privacy',
+                  },
+                ],
+              ],
+            },
+          },
+        );
+      } catch (error) {
+        this.logger.error(`Error in set_privacy_private handler: ${error}`);
+        await ctx.answerCbQuery('❌ Произошла ошибка');
+      }
+    });
+
+    // Handle change timezone from privacy settings
+    this.bot.action('change_timezone', async (ctx) => {
+      await ctx.answerCbQuery();
+      ctx.session.pendingAction = 'editing_privacy_timezone';
+      await this.askForTimezone(ctx);
     });
 
     // Toggle handlers for settings
@@ -2529,7 +3257,8 @@ ${statusMessage}
       await ctx.answerCbQuery();
       const user = await this.userService.findByTelegramId(ctx.userId);
 
-      await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
         `
 🥇 *Ваши достижения*
 
@@ -2562,7 +3291,8 @@ ${statusMessage}
 
     this.bot.action('challenges', async (ctx) => {
       await ctx.answerCbQuery();
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `
 🚀 *Челленджи*
 
@@ -2618,7 +3348,8 @@ ${statusMessage}
         nextMilestone = '\n🏆 **Все достижения разблокированы!**';
       }
 
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `
 🤝 *РЕФЕРАЛЬНАЯ СИСТЕМА*
 
@@ -3039,7 +3770,8 @@ ${
       await ctx.answerCbQuery();
       const user = await this.userService.findByTelegramId(ctx.userId);
 
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `
 👤 *Ваш профиль*
 
@@ -3068,6 +3800,154 @@ ${
                 { text: '⬅️ Назад', callback_data: 'more_functions' },
               ],
               [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+            ],
+          },
+        },
+      );
+    });
+
+    // Edit profile handler
+    this.bot.action('edit_profile', async (ctx) => {
+      await ctx.answerCbQuery();
+      const user = await this.userService.findByTelegramId(ctx.userId);
+
+      await this.safeEditOrReply(
+        ctx,
+        `✏️ *Редактирование профиля*\n\nВыберите, что хотите изменить:`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📛 Изменить имя', callback_data: 'edit_profile_name' }],
+              [{ text: '🌍 Изменить город', callback_data: 'edit_profile_city' }],
+              [{ text: '⏰ Изменить часовой пояс', callback_data: 'edit_profile_timezone' }],
+              [
+                {
+                  text: `🔔 Уведомления: ${user.notifications ? '✅' : '❌'}`,
+                  callback_data: 'toggle_notifications',
+                },
+              ],
+              [
+                {
+                  text: `🤖 ИИ-режим: ${user.aiMode ? '✅' : '❌'}`,
+                  callback_data: 'toggle_ai_mode',
+                },
+              ],
+              [{ text: '⬅️ Назад к профилю', callback_data: 'user_profile' }],
+            ],
+          },
+        },
+      );
+    });
+
+    // Edit profile name
+    this.bot.action('edit_profile_name', async (ctx) => {
+      await ctx.answerCbQuery();
+      ctx.session.step = 'editing_profile_name';
+      await this.safeEditOrReply(
+        ctx,
+        `📛 *Изменение имени*\n\nВведите новое имя:`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '⬅️ Назад', callback_data: 'edit_profile' }],
+            ],
+          },
+        },
+      );
+    });
+
+    // Edit profile city
+    this.bot.action('edit_profile_city', async (ctx) => {
+      await ctx.answerCbQuery();
+      ctx.session.step = 'editing_profile_city';
+      await this.safeEditOrReply(
+        ctx,
+        `🌍 *Изменение города*\n\nВведите название города:`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '⬅️ Назад', callback_data: 'edit_profile' }],
+            ],
+          },
+        },
+      );
+    });
+
+    // Edit profile timezone
+    this.bot.action('edit_profile_timezone', async (ctx) => {
+      await ctx.answerCbQuery();
+      ctx.session.pendingAction = 'editing_profile_timezone';
+      await this.askForTimezone(ctx);
+    });
+
+    // Toggle notifications
+    this.bot.action('toggle_notifications', async (ctx) => {
+      await ctx.answerCbQuery();
+      const user = await this.userService.findByTelegramId(ctx.userId);
+      await this.userService.updateUser(ctx.userId, {
+        notifications: !user.notifications,
+      });
+      // Обновляем меню редактирования с новыми данными
+      const updatedUser = await this.userService.findByTelegramId(ctx.userId);
+      await this.safeEditOrReply(
+        ctx,
+        `✏️ *Редактирование профиля*\n\nВыберите, что хотите изменить:`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📛 Изменить имя', callback_data: 'edit_profile_name' }],
+              [{ text: '🌍 Изменить город', callback_data: 'edit_profile_city' }],
+              [{ text: '⏰ Изменить часовой пояс', callback_data: 'edit_profile_timezone' }],
+              [
+                {
+                  text: `🔔 Уведомления: ${updatedUser.notifications ? '✅' : '❌'}`,
+                  callback_data: 'toggle_notifications',
+                },
+              ],
+              [
+                {
+                  text: `🤖 ИИ-режим: ${updatedUser.aiMode ? '✅' : '❌'}`,
+                  callback_data: 'toggle_ai_mode',
+                },
+              ],
+              [{ text: '⬅️ Назад к профилю', callback_data: 'user_profile' }],
+            ],
+          },
+        },
+      );
+    });
+
+    // Toggle AI mode
+    this.bot.action('toggle_ai_mode', async (ctx) => {
+      await ctx.answerCbQuery();
+      const user = await this.userService.findByTelegramId(ctx.userId);
+      await this.userService.updateUser(ctx.userId, {
+        aiMode: !user.aiMode,
+      });
+      // Обновляем меню редактирования с новыми данными
+      const updatedUser = await this.userService.findByTelegramId(ctx.userId);
+      await this.safeEditOrReply(
+        ctx,
+        `✏️ *Редактирование профиля*\n\nВыберите, что хотите изменить:`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📛 Изменить имя', callback_data: 'edit_profile_name' }],
+              [{ text: '🌍 Изменить город', callback_data: 'edit_profile_city' }],
+              [{ text: '⏰ Изменить часовой пояс', callback_data: 'edit_profile_timezone' }],
+              [
+                {
+                  text: `🔔 Уведомления: ${updatedUser.notifications ? '✅' : '❌'}`,
+                  callback_data: 'toggle_notifications',
+                },
+              ],
+              [
+                {
+                  text: `🤖 ИИ-режим: ${updatedUser.aiMode ? '✅' : '❌'}`,
+                  callback_data: 'toggle_ai_mode',
+                },
+              ],
+              [{ text: '⬅️ Назад к профилю', callback_data: 'user_profile' }],
             ],
           },
         },
@@ -3141,8 +4021,9 @@ ${
     this.bot.action('disable_all_reminders', async (ctx) => {
       await ctx.answerCbQuery();
       try {
-        // Отключаем уведомления у пользователя
+        // Отключаем все уведомления у пользователя
         await this.userService.updateUser(ctx.userId, {
+          notifications: false,
           dailyReminders: false,
         });
 
@@ -3157,12 +4038,17 @@ ${
           },
         });
 
-        await ctx.editMessageTextWithMarkdown(
-          `🔕 *Уведомления отключены*
+        await this.safeEditOrReply(
+          ctx,
+          `🔕 *Все уведомления отключены*
 
-Все ваши напоминания были отключены. Вы больше не будете получать уведомления.
+✅ Уведомления: Отключены
+✅ Ежедневные напоминания: Отключены
+✅ Все активные напоминания: Отключены
 
-💡 Вы можете включить их обратно в настройках бота.`,
+💡 Вы больше не будете получать уведомления от бота.
+
+🔄 Вы можете включить их обратно в любой момент.`,
           {
             reply_markup: {
               inline_keyboard: [
@@ -3174,8 +4060,8 @@ ${
                 ],
                 [
                   {
-                    text: '⚙️ Настройки',
-                    callback_data: 'settings_menu',
+                    text: '🔔 Настройки уведомлений',
+                    callback_data: 'settings_notifications',
                   },
                 ],
                 [
@@ -3201,26 +4087,31 @@ ${
       await ctx.answerCbQuery();
       try {
         await this.userService.updateUser(ctx.userId, {
+          notifications: true,
           dailyReminders: true,
         });
 
-        await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
           `🔔 *Уведомления включены*
 
-Уведомления снова активированы. Вы будете получать напоминания согласно расписанию.`,
+✅ Уведомления: Включены
+✅ Ежедневные напоминания: Включены
+
+💡 Вы снова будете получать уведомления согласно расписанию.`,
           {
             reply_markup: {
               inline_keyboard: [
                 [
                   {
-                    text: '🔔 Мои напоминания',
-                    callback_data: 'reminders',
+                    text: '🔔 Настройки уведомлений',
+                    callback_data: 'settings_notifications',
                   },
                 ],
                 [
                   {
-                    text: '⚙️ Настройки',
-                    callback_data: 'settings_menu',
+                    text: '🧪 Тест уведомления',
+                    callback_data: 'test_notification',
                   },
                 ],
                 [
@@ -3275,7 +4166,8 @@ ${
       await ctx.answerCbQuery();
       const user = await this.userService.findByTelegramId(ctx.userId);
 
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `
 🛍️ *XP Магазин*
 
@@ -3542,62 +4434,7 @@ ${
     // Billing handlers
     this.bot.action('show_limits', async (ctx) => {
       await ctx.answerCbQuery();
-      const subscriptionStatus =
-        await this.billingService.getSubscriptionStatus(ctx.userId);
-
-      const limitsText =
-        subscriptionStatus.limits.dailyReminders === -1
-          ? '∞ (безлимит)'
-          : subscriptionStatus.limits.dailyReminders.toString();
-      const aiLimitsText =
-        subscriptionStatus.limits.dailyAiQueries === -1
-          ? '∞ (безлимит)'
-          : subscriptionStatus.limits.dailyAiQueries.toString();
-
-      let statusMessage = '';
-      if (subscriptionStatus.isTrialActive) {
-        statusMessage = `🎁 **Пробный период:** ${subscriptionStatus.daysRemaining} дней осталось`;
-      } else {
-        statusMessage = `💎 **Подписка:** ${
-          subscriptionStatus.type === 'FREE'
-            ? 'Бесплатная'
-            : subscriptionStatus.type === 'PREMIUM'
-              ? 'Premium'
-              : 'Premium Plus'
-        }`;
-      }
-
-      await ctx.replyWithMarkdown(
-        `
-📊 *Ваши лимиты и использование*
-
-${statusMessage}
-
-**Текущее использование сегодня:**
-🔔 Напоминания: ${subscriptionStatus.usage.dailyReminders}/${limitsText}
-🧠 ИИ-запросы: ${subscriptionStatus.usage.dailyAiQueries}/${aiLimitsText}
-📝 Задачи: ${subscriptionStatus.usage.dailyTasks}${subscriptionStatus.limits.dailyTasks === -1 ? '' : `/${subscriptionStatus.limits.dailyTasks}`}
-🔄 Привычки: ${subscriptionStatus.usage.dailyHabits}${subscriptionStatus.limits.dailyHabits === -1 ? '' : `/${subscriptionStatus.limits.dailyHabits}`}
-
-**Доступные функции:**
-📊 Расширенная аналитика: ${subscriptionStatus.limits.advancedAnalytics ? '✅' : '❌'}
-🎨 Кастомные темы: ${subscriptionStatus.limits.customThemes ? '✅' : '❌'}
-🚀 Приоритетная поддержка: ${subscriptionStatus.limits.prioritySupport ? '✅' : '❌'}
-      `,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: '💎 Обновиться до Premium',
-                  callback_data: 'upgrade_premium',
-                },
-              ],
-              [{ text: '⬅️ Назад', callback_data: 'back_to_menu' }],
-            ],
-          },
-        },
-      );
+      await this.showLimitsMenu(ctx);
     });
 
     this.bot.action('upgrade_premium', async (ctx) => {
@@ -3695,7 +4532,8 @@ ${trialText}**Premium подписка включает:**
 
     this.bot.action('dependencies', async (ctx) => {
       await ctx.answerCbQuery();
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `
 🎭 *Блок зависимостей*
 
@@ -3739,7 +4577,8 @@ ${trialText}**Premium подписка включает:**
         });
 
         if (dependencies.length === 0) {
-          await ctx.editMessageTextWithMarkdown(
+          await this.safeEditOrReply(
+            ctx,
             `
 📊 *Мои результаты по зависимостям*
 
@@ -3782,15 +4621,17 @@ ${trialText}**Premium подписка включает:**
           const depName =
             dependencyNames[dependency.type] ||
             `✍️ ${dependency.customName || dependency.type}`;
-          const startDate = dependency.createdAt;
+          
+          // Безопасная обработка дат и значений
+          const startDate = dependency.createdAt ? new Date(dependency.createdAt) : new Date();
           const now = new Date();
-          const totalDays = Math.floor(
+          const totalDays = Math.max(0, Math.floor(
             (now.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
-          );
-          const cleanDays = dependency.daysClean || 0;
+          ));
+          const cleanDays = dependency.daysClean ?? 0;
+          const keptPromises = dependency.keptPromises ?? 0;
           const successRate =
             totalDays > 0 ? Math.round((cleanDays / totalDays) * 100) : 100;
-          const keptPromises = dependency.keptPromises || 0;
 
           statsMessage += `${depName}\n`;
           statsMessage += `📅 **Начал:** ${startDate.toLocaleDateString('ru-RU')}\n`;
@@ -3815,36 +4656,227 @@ ${trialText}**Premium подписка включает:**
 
         statsMessage += `💡 *Помните: каждый день без зависимости - это победа!*`;
 
-        await ctx.editMessageTextWithMarkdown(statsMessage, {
-          reply_markup: {
-            inline_keyboard: [
+        const dependencyNames = {
+          SMOKING: '🚭 Курение',
+          ALCOHOL: '🍺 Алкоголь',
+          GAMBLING: '🎰 Азартные игры',
+          SWEET: '🍰 Сладкое',
+          SOCIAL_MEDIA: '📱 Соцсети',
+          GAMING: '🎮 Игры',
+          OTHER: '🛒 Другое',
+        };
+
+        const keyboardRows: any[] = [
               [
                 {
                   text: '🔄 Обновить статистику',
                   callback_data: 'dependency_results',
                 },
               ],
+        ];
+
+        // Добавляем кнопки остановки для каждой зависимости
+        for (const dep of dependencies) {
+          const depName =
+            dependencyNames[dep.type] ||
+            `✍️ ${dep.customName || dep.type}`;
+          keyboardRows.push([
+            {
+              text: `⏹️ Остановить: ${depName}`,
+              callback_data: `stop_dependency_${dep.id}`,
+            },
+          ]);
+        }
+
+        // Добавляем кнопку для остановки всех зависимостей
+        if (dependencies.length > 1) {
+          keyboardRows.push([
+            {
+              text: '⏹️ Остановить все зависимости',
+              callback_data: 'stop_all_dependencies',
+            },
+          ]);
+        }
+
+        keyboardRows.push(
               [{ text: '⬅️ Назад', callback_data: 'dependencies' }],
               [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
-            ],
+        );
+
+        await this.safeEditOrReply(
+          ctx,
+          statsMessage,
+          {
+            reply_markup: {
+              inline_keyboard: keyboardRows,
+            },
           },
-        });
+        );
       } catch (error) {
         this.logger.error('Error fetching dependency results:', error);
-        await ctx.editMessageTextWithMarkdown(
+        this.logger.error('Error details:', error instanceof Error ? error.stack : error);
+        await this.safeEditOrReply(
+          ctx,
           `
 ❌ *Ошибка получения статистики*
 
 Не удалось загрузить ваши результаты. Попробуйте позже.
+
+Ошибка: ${error instanceof Error ? error.message : 'Неизвестная ошибка'}
           `,
           {
             reply_markup: {
               inline_keyboard: [
+                [
+                  {
+                    text: '🔄 Обновить статистику',
+                    callback_data: 'dependency_results',
+                  },
+                ],
                 [{ text: '⬅️ Назад', callback_data: 'dependencies' }],
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
               ],
             },
           },
         );
+      }
+    });
+
+    // Handle stop dependency tracker
+    this.bot.action(/^stop_dependency_(.+)$/, async (ctx) => {
+      await ctx.answerCbQuery();
+      const dependencyId = ctx.match[1];
+
+      try {
+        const dependency = await this.prisma.dependencySupport.findUnique({
+          where: { id: dependencyId },
+        });
+
+        if (!dependency || dependency.userId !== ctx.userId) {
+          await ctx.replyWithMarkdown('❌ Зависимость не найдена.');
+          return;
+        }
+
+        // Обновляем статус зависимости на PAUSED
+        await this.prisma.dependencySupport.update({
+          where: { id: dependencyId },
+          data: { status: 'PAUSED' },
+        });
+
+        // Деактивируем все связанные Reminder записи
+        // Используем DISMISSED статус вместо INACTIVE (так как INACTIVE может не существовать в enum)
+        await this.prisma.reminder.updateMany({
+          where: {
+            userId: dependency.userId,
+            relatedEntityId: dependencyId,
+            status: 'ACTIVE',
+          },
+          data: {
+            status: 'DISMISSED',
+            dismissedAt: new Date(),
+          },
+        });
+
+        this.logger.log(
+          `Dependency ${dependencyId} stopped for user ${ctx.userId}, related reminders deactivated`,
+        );
+
+        const dependencyNames = {
+          SMOKING: '🚭 Курение',
+          ALCOHOL: '🍺 Алкоголь',
+          GAMBLING: '🎰 Азартные игры',
+          SWEET: '🍰 Сладкое',
+          SOCIAL_MEDIA: '📱 Соцсети',
+          GAMING: '🎮 Игры',
+          OTHER: '🛒 Другое',
+        };
+
+        const depName =
+          dependencyNames[dependency.type] ||
+          `✍️ ${dependency.customName || dependency.type}`;
+
+        await ctx.replyWithMarkdown(
+          `✅ Трекер для "${depName}" остановлен.\n\nВы можете возобновить отслеживание в любое время.`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '📊 Мои зависимости', callback_data: 'dependency_results' }],
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+      } catch (error) {
+        this.logger.error('Error stopping dependency:', error);
+        await ctx.replyWithMarkdown('❌ Ошибка при остановке трекера.');
+      }
+    });
+
+    // Handle stop all dependencies
+    this.bot.action('stop_all_dependencies', async (ctx) => {
+      await ctx.answerCbQuery();
+
+      try {
+        // Получаем все активные зависимости пользователя
+        const activeDependencies = await this.prisma.dependencySupport.findMany({
+          where: {
+            userId: ctx.userId,
+            status: 'ACTIVE',
+          },
+        });
+
+        if (activeDependencies.length === 0) {
+          await ctx.replyWithMarkdown('✅ У вас нет активных зависимостей.');
+          return;
+        }
+
+        // Останавливаем все зависимости
+        const dependencyIds = activeDependencies.map((d) => d.id);
+        
+        await this.prisma.dependencySupport.updateMany({
+          where: {
+            userId: ctx.userId,
+            status: 'ACTIVE',
+          },
+          data: {
+            status: 'PAUSED',
+          },
+        });
+
+        // Деактивируем все связанные Reminder записи
+        // Используем OR условие для каждого dependencyId
+        if (dependencyIds.length > 0) {
+          await this.prisma.reminder.updateMany({
+            where: {
+              userId: ctx.userId,
+              OR: dependencyIds.map((id) => ({ relatedEntityId: id })),
+              status: 'ACTIVE',
+            },
+            data: {
+              status: 'DISMISSED',
+              dismissedAt: new Date(),
+            },
+          });
+        }
+
+        this.logger.log(
+          `All dependencies stopped for user ${ctx.userId}, ${activeDependencies.length} dependencies paused`,
+        );
+
+        await ctx.replyWithMarkdown(
+          `✅ Все зависимости (${activeDependencies.length}) остановлены.\n\nУведомления больше не будут приходить. Вы можете возобновить отслеживание в любое время.`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '📊 Мои зависимости', callback_data: 'dependency_results' }],
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+      } catch (error) {
+        this.logger.error('Error stopping all dependencies:', error);
+        await ctx.replyWithMarkdown('❌ Ошибка при остановке зависимостей.');
       }
     });
 
@@ -5198,53 +6230,109 @@ ${moodEmoji} *Настроение записано!*
 
     this.bot.action('faq_support', async (ctx) => {
       await ctx.answerCbQuery();
-      await ctx.replyWithMarkdown(
-        `
-❓ *FAQ — ЧАСТО ЗАДАВАЕМЫЕ ВОПРОСЫ*
+      await this.showFAQMenu(ctx);
+    });
 
-1. **Как добавить новую задачу?**
-Просто нажмите на кнопку «Создать задачу/привычку» или напиши в чат: «Напомнить завтра в 17:00 зайти на почту» и бот автоматически создаст Вам эту задачу.
-
-2. **Что такое XP и уровень?**
-XP (опыт) начисляется за выполнение задач. С каждым уровнем открываются новые челленджи и бонусы.
-
-3. **Что значит «отправить голосовое сообщение»?**
-Бот умеет распознавать голосовые сообщения и автоматически выполняет задачу которую Вы записали (создает задачу/напоминание/привычку).
-
-4. **Что значит функция ИИ – Помощник?**
-Искусственный интеллект анализирует все ваши задачи, привычки, зависимости и дает рекомендации по достижению результата. Представьте что это личный тренер, психолог, наставник, коллега и друг в одном лице.
-
-5. **Как отключить/настроить напоминания?**
-В меню "⚙️ Настройки" можно включить, отключить или изменить время напоминаний.
-
-6. **Кто видит мои задачи?**
-Ваши задачи видите только вы. Можно делиться отдельными результатами по желанию.
-
-7. **Как работает челлендж?**
-Это тематические задания на время — за участие начисляются дополнительные XP и достижения.
-
-8. **Что делать, если бот не отвечает?**
-Попробуйте перезапустить Telegram. Если не поможет напишите в "FAQ / Поддержка".
-
-9. **Как связаться с поддержкой?**
-В конце любого раздела FAQ есть кнопка "📝 Задать вопрос".
-
-10. **Как быстро перейти к любимой функции?**
-Введите "/" — появится быстрый список всех команд и функций.
-
-11. **Как работает реферальная система?**
-Вы просто копируете ссылку в меню «Реферальная программа» и отправляете другу. С того кто зарегистрируется по ней и подключит подписку Вы будете ежемесячно получать по 40% с его оплат!
-
-12. **Как работает система бесплатной подписки навсегда при добавлении 5 друзей к боту?**
-Вы отправляете ссылку на регистрацию в нашем боте и когда Вы наберете 5 регистраций Вам автоматически придет уведомление о том, что Вы получили бесплатную премиум версию навсегда!
-
-*Если не нашли ответа — напишите нам!*
-      `,
+    // FAQ detail handlers
+    this.bot.action('faq_add_task', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `📝 *Как добавить задачу?*\n\nНажмите кнопку «➕ Добавить задачу» или напишите в чат: «Напомнить завтра в 17:00 зайти на почту» — бот автоматически создаст задачу.`,
         {
           reply_markup: {
             inline_keyboard: [
-              [{ text: '📝 Задать вопрос', callback_data: 'ask_question' }],
-              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
+            ],
+          },
+        },
+      );
+    });
+
+    this.bot.action('faq_xp', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `⭐ *Что такое XP и уровень?*\n\nXP (опыт) начисляется за выполнение задач. С каждым уровнем открываются новые челленджи и бонусы.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
+            ],
+          },
+        },
+      );
+    });
+
+    this.bot.action('faq_voice', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `🎤 *Голосовые сообщения*\n\nБот распознает голосовые сообщения и автоматически создает задачи, напоминания или привычки.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
+            ],
+          },
+        },
+      );
+    });
+
+    this.bot.action('faq_ai', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `🤖 *ИИ-помощник*\n\nИИ анализирует ваши задачи, привычки, зависимости и дает персональные рекомендации. Это личный тренер, психолог и наставник в одном лице.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
+            ],
+          },
+        },
+      );
+    });
+
+    this.bot.action('faq_reminders', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `⚙️ *Настройка напоминаний*\n\nВ меню "⚙️ Настройки" можно включить, отключить или изменить время напоминаний.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
+            ],
+          },
+        },
+      );
+    });
+
+    this.bot.action('faq_privacy', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `🔒 *Приватность данных*\n\nВаши задачи видите только вы. Можно делиться отдельными результатами по желанию.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
+            ],
+          },
+        },
+      );
+    });
+
+    this.bot.action('faq_referral', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.safeEditOrReply(
+        ctx,
+        `💰 *Реферальная система*\n\nСкопируйте ссылку в меню «Реферальная программа» и отправьте другу. С каждого, кто зарегистрируется по вашей ссылке и подключит подписку, вы будете получать 40% с его оплат!`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔙 Назад к FAQ', callback_data: 'faq_support' }],
             ],
           },
         },
@@ -5253,14 +6341,9 @@ XP (опыт) начисляется за выполнение задач. С к
 
     this.bot.action('ask_question', async (ctx) => {
       await ctx.answerCbQuery();
-      await ctx.editMessageTextWithMarkdown(
-        `
-📝 *Задать вопрос поддержке*
-
-Пожалуйста, опишите ваш вопрос или проблему в следующем сообщении, и наша команда поддержки свяжется с вами в ближайшее время.
-
-Можете также написать команду /feedback для отправки обратной связи.
-      `,
+      await this.safeEditOrReply(
+        ctx,
+        `📝 *Задать вопрос поддержке*\n\nПожалуйста, опишите ваш вопрос или проблему в следующем сообщении, и наша команда поддержки свяжется с вами в ближайшее время.\n\nМожете также написать команду /feedback для отправки обратной связи.`,
         {
           reply_markup: {
             inline_keyboard: [
@@ -5439,12 +6522,31 @@ XP (опыт) начисляется за выполнение задач. С к
     });
 
     this.bot.action('ai_custom_question', async (ctx) => {
+      await ctx.answerCbQuery();
       await this.handleAICustomQuestion(ctx);
     });
 
     this.bot.action('ai_back_menu', async (ctx) => {
       await ctx.answerCbQuery();
+      // Отключаем режим ИИ-чата при возврате в меню
+      ctx.session.aiChatMode = false;
       await this.startAIChat(ctx);
+    });
+
+    this.bot.action('exit_ai_chat', async (ctx) => {
+      await ctx.answerCbQuery();
+      ctx.session.aiChatMode = false;
+      await this.safeEditOrReply(
+        ctx,
+        '🧠 Режим ИИ-чата завершён. Вы можете продолжить работу через главное меню.',
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+            ],
+          },
+        },
+      );
     });
 
     // AI specialized handlers
@@ -5471,6 +6573,24 @@ XP (опыт) начисляется за выполнение задач. С к
     this.bot.action('ai_custom_question', async (ctx) => {
       await ctx.answerCbQuery();
       await this.handleAICustomQuestion(ctx);
+    });
+
+    this.bot.action('ai_continue_chat', async (ctx) => {
+      await ctx.answerCbQuery();
+      // Активируем режим ИИ-чата и показываем приглашение
+      ctx.session.aiChatMode = true;
+      await this.safeEditOrReply(
+        ctx,
+        `💬 *Задайте свой вопрос*\n\nНапишите любой вопрос, и я отвечу на него!\n\n💡 *Примеры вопросов:*\n• Как бросить курить?\n• Как стать продуктивнее?\n• Как сформировать полезную привычку?\n• Как планировать время?`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '⬅️ Назад к ИИ меню', callback_data: 'ai_back_menu' }],
+              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+            ],
+          },
+        },
+      );
     });
 
     // Handle AI habit creation
@@ -5513,9 +6633,23 @@ XP (опыт) начисляется за выполнение задач. С к
 
     // Handle task completion
     this.bot.action(/^task_complete_(.+)$/, async (ctx) => {
-      await ctx.answerCbQuery('🎉 Отлично! Задача выполнена!');
+      await ctx.answerCbQuery();
       const taskId = ctx.match[1];
       await this.completeTask(ctx, taskId);
+    });
+
+    // Handle quick task completion from tasks menu (like habits)
+    this.bot.action(/^task_quick_complete_(.+)$/, async (ctx) => {
+      await ctx.answerCbQuery('✅ Задача выполнена!');
+      const taskId = ctx.match[1];
+      await this.quickCompleteTask(ctx, taskId);
+    });
+
+    // Handle quick task cancel from tasks menu (like habits)
+    this.bot.action(/^task_quick_cancel_(.+)$/, async (ctx) => {
+      await ctx.answerCbQuery('Задача отмечена как активная!');
+      const taskId = ctx.match[1];
+      await this.quickCancelTask(ctx, taskId);
     });
 
     // Handle task status toggle (complete/uncomplete)
@@ -5674,21 +6808,14 @@ XP (опыт) начисляется за выполнение задач. С к
 
     // Reopen a completed task
     this.bot.action(/^task_reopen_(.+)$/, async (ctx) => {
-      await ctx.answerCbQuery('📝 Задача возвращена в активные.');
+      await ctx.answerCbQuery();
       const taskId = ctx.match[1];
       try {
         await this.taskService.updateTask(taskId, ctx.userId, {
           status: 'PENDING',
         } as any);
-        
-        const userBefore = await this.userService.findByTelegramId(ctx.userId);
-
-        const statsUpdate = await this.userService.updateStats(ctx.userId, {
-          todayTasks: userBefore.todayTasks - 1,
-          xpGained: -10,
-        });
-
-        await this.showTasksMenu(ctx);
+        await ctx.replyWithMarkdown('✅ Задача возвращена в активные.');
+        await this.showTodayTasks(ctx);
       } catch (err) {
         this.logger.error('Error reopening task:', err);
         await ctx.replyWithMarkdown('❌ Не удалось вернуть задачу.');
@@ -6779,6 +7906,9 @@ XP (опыт) начисляется за выполнение задач. С к
 
   // AI specialized handlers
   private async handleAITaskRecommendations(ctx: BotContext) {
+    // Активируем режим ИИ-чата для продолжения диалога
+    ctx.session.aiChatMode = true;
+    
     const user = await this.userService.findByTelegramId(ctx.userId);
     const tasks = await this.taskService.findTasksByUserId(ctx.userId);
     const completedTasks = tasks.filter((t) => t.completedAt !== null);
@@ -6787,7 +7917,8 @@ XP (опыт) начисляется за выполнение задач. С к
 
     // Inform the user that AI is working on recommendations
     try {
-      await ctx.editMessageTextWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         `⏳ *ИИ анализирует ваш профиль и готовит персональные рекомендации...*`,
         {
           reply_markup: {
@@ -6831,19 +7962,13 @@ XP (опыт) начисляется за выполнение задач. С к
       }
     }
 
-    await ctx.editMessageTextWithMarkdown(
-      `
-💡 *Рекомендации по задачам*
-
-📊 Статистика: ${completedTasks.length}/${tasks.length} задач выполнено
-
-${recommendation}
-
-*Совет:* Разбивайте большие задачи на маленькие шаги.
-      `,
+    await this.safeEditOrReply(
+      ctx,
+      `💡 *Рекомендации по задачам*\n\n📊 Статистика: ${completedTasks.length}/${tasks.length} задач выполнено\n\n${recommendation}\n\n*Совет:* Разбивайте большие задачи на маленькие шаги.\n\n💬 *Можете задать мне любой вопрос!*`,
       {
         reply_markup: {
           inline_keyboard: [
+            [{ text: '💬 Задать вопрос', callback_data: 'ai_continue_chat' }],
             [{ text: '⬅️ Назад к ИИ меню', callback_data: 'ai_back_menu' }],
             [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
           ],
@@ -6853,6 +7978,9 @@ ${recommendation}
   }
 
   private async handleAIHabitHelp(ctx: BotContext) {
+    // Активируем режим ИИ-чата для продолжения диалога
+    ctx.session.aiChatMode = true;
+    
     try {
       const user = await this.userService.findByTelegramId(ctx.userId);
       const habits = await this.habitService.findHabitsByUserId(ctx.userId);
@@ -6860,7 +7988,8 @@ ${recommendation}
 
       // Показываем промежуточное сообщение, пока ИИ готовит рекомендации по привычкам
       try {
-        await ctx.editMessageTextWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
           `⏳ *ИИ анализирует ваш профиль и готовит персональные рекомендации по привычкам...*`,
           {
             reply_markup: {
@@ -6921,6 +8050,8 @@ ${recommendation}
         message += `${index + 1}. ${rec}\n`;
       });
 
+      message += '\n\n💬 *Можете задать мне любой вопрос!*';
+
       const keyboard = {
         inline_keyboard: [
           [
@@ -6933,6 +8064,7 @@ ${recommendation}
               callback_data: 'habits_list',
             },
           ],
+          [{ text: '💬 Задать вопрос', callback_data: 'ai_continue_chat' }],
           [
             {
               text: '⬅️ Назад к ИИ меню',
@@ -6942,26 +8074,7 @@ ${recommendation}
         ],
       };
 
-      try {
-        await ctx.editMessageTextWithMarkdown(message, {
-          reply_markup: keyboard,
-        });
-      } catch (err) {
-        // If Telegram reports that message is not modified, send a new message instead
-        const e = err as any;
-        const desc = e?.response?.description || e?.message || '';
-        if (
-          typeof desc === 'string' &&
-          desc.includes('message is not modified')
-        ) {
-          this.logger.log(
-            'Edit resulted in no-op, sending a new message instead',
-          );
-          await ctx.replyWithMarkdown(message, { reply_markup: keyboard });
-        } else {
-          throw err;
-        }
-      }
+      await this.safeEditOrReply(ctx, message, { reply_markup: keyboard });
     } catch (error) {
       this.logger.error('Error in handleAIHabitHelp:', error);
       await ctx.editMessageTextWithMarkdown(
@@ -7090,10 +8203,6 @@ ${recommendation}
             {
               text: '🏠 Главное меню',
               callback_data: 'back_to_menu',
-            },
-            {
-              text: '❓ Что еще я умею?',
-              callback_data: 'faq_support',
             },
           ],
         ],
@@ -7450,6 +8559,9 @@ ${recommendation}
   }
 
   private async handleAITimePlanning(ctx: BotContext) {
+    // Активируем режим ИИ-чата для продолжения диалога
+    ctx.session.aiChatMode = true;
+    
     const user = await this.userService.findByTelegramId(ctx.userId);
     const currentHour = new Date().getHours();
 
@@ -7468,22 +8580,13 @@ ${recommendation}
         '🌆 Вечер - время для планирования завтрашнего дня и легких задач.';
     }
 
-    await ctx.editMessageTextWithMarkdown(
-      `
-⏰ *Планирование времени*
-
-🕐 Сейчас ${currentHour}:00
-
-${timeAdvice}
-
-*Методы:*
-• 🍅 Помодоро (25 мин работа / 5 мин отдых)
-• ⏰ Блокировка времени 
-• 🎯 Правило 3-х приоритетов
-      `,
+    await this.safeEditOrReply(
+      ctx,
+      `⏰ *Планирование времени*\n\n🕐 Сейчас ${currentHour}:00\n\n${timeAdvice}\n\n*Методы:*\n• 🍅 Помодоро (25 мин работа / 5 мин отдых)\n• ⏰ Блокировка времени\n• 🎯 Правило 3-х приоритетов\n\n💬 *Можете задать мне любой вопрос!*`,
       {
         reply_markup: {
           inline_keyboard: [
+            [{ text: '💬 Задать вопрос', callback_data: 'ai_continue_chat' }],
             [{ text: '⬅️ Назад к ИИ меню', callback_data: 'ai_back_menu' }],
             [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
           ],
@@ -7493,19 +8596,12 @@ ${timeAdvice}
   }
 
   private async handleAICustomQuestion(ctx: BotContext) {
-    await ctx.editMessageTextWithMarkdown(
-      `
-✍️ *Задайте свой вопрос*
-
-Напишите вопрос по одной из тем:
-• Управлении задачами
-• Формировании привычек  
-• Планировании времени
-• Мотивации и целях
-• Продуктивности
-
-Я отвечу кратко и по делу!
-      `,
+    // Активируем режим ИИ-чата ПЕРЕД отправкой сообщения
+    ctx.session.aiChatMode = true;
+    
+    await this.safeEditOrReply(
+      ctx,
+      `✍️ *Задайте свой вопрос*\n\nНапишите любой вопрос, и я отвечу на него!\n\n💡 *Примеры вопросов:*\n• Как бросить курить?\n• Как стать продуктивнее?\n• Как сформировать полезную привычку?\n• Как планировать время?\n\nЯ отвечу кратко и по делу!`,
       {
         reply_markup: {
           inline_keyboard: [
@@ -7515,9 +8611,6 @@ ${timeAdvice}
         },
       },
     );
-
-    // Enable custom AI chat mode
-    ctx.session.aiChatMode = true;
   }
 
   // Referral system methods
@@ -7893,7 +8986,7 @@ ${timeAdvice}
         [
           { text: '🚀 Начать', callback_data: 'onboarding_start' },
           {
-            text: '👀 Посмотреть примеры',
+            text: '👀 Примеры',
             callback_data: 'onboarding_examples',
           },
         ],
@@ -7968,26 +9061,29 @@ ${timeAdvice}
     ctx.session.pendingAction = undefined;
     ctx.session.tempData = undefined;
 
+    // Старое меню с прежней структурой кнопок
     const keyboard = {
-      inline_keyboard: [
-        [
-          { text: '➕ Добавить привычку', callback_data: 'add_habit' },
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '➕ Добавить привычку', callback_data: 'add_habit' },
+          ],
+          [
+            { text: '✅ Мои привычки', callback_data: 'my_habits' },
+            { text: '📝 Мои задачи', callback_data: 'my_tasks' },
+          ],
+          [
+            { text: '🍅 Фокус', callback_data: 'pomodoro_focus' },
+            { text: '🧠 ИИ чат', callback_data: 'ai_chat' },
+            { text: '🟢 Ещё...', callback_data: 'more_functions' },
+          ],
+          [
+            { text: '📊 Прогресс', callback_data: 'my_progress' },
+            { text: '❓ Помощь', callback_data: 'faq_support' },
+            { text: '🔒 Лимиты', callback_data: 'show_limits' },
+          ],
         ],
-        [
-          { text: '✅ Мои привычки', callback_data: 'my_habits' },
-          { text: '📝 Мои задачи', callback_data: 'my_tasks' },
-        ],
-        [
-          { text: '🍅 Фокус', callback_data: 'pomodoro_focus' },
-          { text: '🧠 ИИ чат', callback_data: 'ai_chat' },
-          { text: '🟢 Ещё...', callback_data: 'more_functions' },
-        ],
-        [
-          { text: '📊 Прогресс', callback_data: 'my_progress' },
-          { text: '❓ Помощь', callback_data: 'faq_support' },
-          { text: '🔒 Лимиты', callback_data: 'show_limits' },
-        ],
-      ],
+      },
     };
 
     const user = await this.getOrCreateUser(ctx);
@@ -8064,8 +9160,8 @@ ${timeAdvice}
           '\n🍅 **Активная фокус-сессия** (осталось ~' + remaining + ' мин)';
       }
 
-      // Добавляем кнопку для быстрого доступа к активной сессии
-      keyboard.inline_keyboard.unshift([
+      // Добавляем кнопку для быстрого доступа к активной сессии в начало меню
+      keyboard.reply_markup.inline_keyboard.unshift([
         { text: '🍅 К активной сессии', callback_data: 'pomodoro_focus' },
       ]);
     }
@@ -8077,52 +9173,102 @@ ${timeAdvice}
     if (trialInfo.isTrialActive) {
       statusText = `🎁 **Пробный период:** ${trialInfo.daysRemaining} дней осталось\n`;
     } else if (subscriptionStatus.type !== 'FREE') {
+      // Показываем остаток дней для Premium подписки
+      if (user.subscriptionEnds) {
+        const now = new Date();
+        const daysRemaining = Math.max(
+          0,
+          Math.ceil(
+            (user.subscriptionEnds.getTime() - now.getTime()) /
+              (1000 * 60 * 60 * 24),
+          ),
+        );
+        statusText = `💎 **${subscriptionStatus.type === 'PREMIUM' ? 'Premium' : 'Premium Plus'}** (осталось ${daysRemaining} ${daysRemaining === 1 ? 'день' : daysRemaining < 5 ? 'дня' : 'дней'})\n`;
+      } else {
       statusText = `💎 **${subscriptionStatus.type === 'PREMIUM' ? 'Premium' : 'Premium Plus'}**\n`;
+      }
     }
 
-    const message = `
-👋 *Привет, ${this.userService.getDisplayName(user)}!*
+    // Сообщение с описанием бота (как было раньше)
+    let message = `👋 *Привет, ${this.userService.getDisplayName(user)}!*\n\n`;
+    
+    if (statusText) {
+      message += `${statusText}`;
+    }
+    
+    message += `🤖 Я Ticky AI – твой личный AI помощник для управления задачами и привычками.\n`;
+    
+    if (habitsProgressBar) {
+      message += habitsProgressBar;
+    }
+    
+    if (pomodoroStatus) {
+      message += pomodoroStatus + '\n';
+    }
+    
+    message += userStats;
 
-${statusText}🤖 Я Ticky AI – твой личный AI помощник для управления задачами и привычками.
-${habitsProgressBar}${pomodoroStatus}${userStats}
-    `;
-
-    if (shouldEdit) {
-      try {
-        await ctx.editMessageTextWithMarkdown(message, {
-          reply_markup: keyboard,
-        });
-      } catch (err) {
-        const e = err as any;
-        const desc = e?.response?.description || e?.message || '';
-        if (
-          typeof desc === 'string' &&
-          desc.includes('message is not modified')
-        ) {
-          this.logger.log(
-            'Edit resulted in no-op (all tasks identical), sending a new message instead',
-          );
-          // Send photo with message for new messages
+    // Отправляем фото при первом запуске, редактируем при возврате в меню
+    if (ctx.callbackQuery) {
+      // При редактировании проверяем, есть ли фото в сообщении
+      const hasPhoto = ctx.callbackQuery.message && 'photo' in ctx.callbackQuery.message;
+      
+      if (hasPhoto) {
+        // Если сообщение с фото, редактируем caption и клавиатуру
+        try {
+          await ctx.editMessageCaption(message, {
+            parse_mode: 'Markdown',
+            reply_markup: keyboard.reply_markup,
+          });
+        } catch (err) {
+          // Если не получается отредактировать, удаляем старое и отправляем новое
+          try {
+            if (ctx.callbackQuery?.message && 'message_id' in ctx.callbackQuery.message) {
+              await ctx.deleteMessage();
+            }
+          } catch (deleteErr) {
+            // Игнорируем ошибку удаления
+          }
           await ctx.replyWithPhoto(
             { source: path.join(__dirname, '../../src/TickyAI.png') },
             {
               caption: message,
               parse_mode: 'Markdown',
-              reply_markup: keyboard,
+              reply_markup: keyboard.reply_markup,
             },
           );
-        } else {
-          throw err;
+        }
+      } else {
+        // Если сообщение без фото, пытаемся отредактировать текст
+        try {
+          await ctx.editMessageTextWithMarkdown(message, keyboard);
+        } catch (err) {
+          // Если не получается отредактировать, удаляем старое и отправляем новое с фото
+          try {
+            if (ctx.callbackQuery?.message && 'message_id' in ctx.callbackQuery.message) {
+              await ctx.deleteMessage();
+            }
+          } catch (deleteErr) {
+            // Игнорируем ошибку удаления
+          }
+          await ctx.replyWithPhoto(
+            { source: path.join(__dirname, '../../src/TickyAI.png') },
+            {
+              caption: message,
+              parse_mode: 'Markdown',
+              reply_markup: keyboard.reply_markup,
+            },
+          );
         }
       }
     } else {
-      // Send photo with message for initial menu display
+      // При первом запуске отправляем фото с текстом
       await ctx.replyWithPhoto(
         { source: path.join(__dirname, '../../src/TickyAI.png') },
         {
           caption: message,
           parse_mode: 'Markdown',
-          reply_markup: keyboard,
+          reply_markup: keyboard.reply_markup,
         },
       );
     }
@@ -8206,106 +9352,170 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
     return this.bot;
   }
 
-  
-
   // Task management methods
+  /**
+   * Экранирует специальные символы Markdown для безопасного использования
+   */
+  private escapeMarkdown(text: string): string {
+    if (!text) return '';
+    return text.replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1');
+  }
+
+  /**
+   * Безопасно редактирует сообщение или отправляет новое, если редактирование невозможно
+   */
+  private async safeEditOrReply(
+    ctx: BotContext,
+    message: string,
+    keyboard: any,
+  ) {
+    // Нормализуем формат клавиатуры
+    let replyMarkup = keyboard;
+    if (keyboard && keyboard.inline_keyboard) {
+      // Если передан объект с inline_keyboard, оборачиваем в reply_markup
+      replyMarkup = { reply_markup: keyboard };
+    } else if (keyboard && keyboard.reply_markup) {
+      // Если уже есть reply_markup, используем как есть
+      replyMarkup = keyboard;
+    } else if (!keyboard) {
+      // Если клавиатуры нет, создаем пустой объект
+      replyMarkup = {};
+    }
+
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageTextWithMarkdown(message, replyMarkup);
+      } catch (err) {
+        const e = err as any;
+        const desc = e?.response?.description || e?.message || '';
+        if (
+          typeof desc === 'string' &&
+          (desc.includes('message is not modified') ||
+           desc.includes('there is no text in the message to edit') ||
+           desc.includes('message can\'t be edited') ||
+           desc.includes('Bad Request: there is no text'))
+        ) {
+          // Если сообщение нельзя отредактировать, удаляем старое и отправляем новое
+          try {
+            if (ctx.callbackQuery?.message && 'message_id' in ctx.callbackQuery.message) {
+              await ctx.deleteMessage();
+            }
+          } catch (deleteErr) {
+            // Игнорируем ошибку удаления
+          }
+          await ctx.replyWithMarkdown(message, replyMarkup);
+        } else {
+          // Для других ошибок тоже отправляем новое сообщение
+          try {
+            if (ctx.callbackQuery?.message && 'message_id' in ctx.callbackQuery.message) {
+              await ctx.deleteMessage();
+            }
+          } catch (deleteErr) {
+            // Игнорируем ошибку удаления
+          }
+          await ctx.replyWithMarkdown(message, replyMarkup);
+        }
+      }
+    } else {
+      await ctx.replyWithMarkdown(message, replyMarkup);
+    }
+  }
+
+  private async showFAQMenu(ctx: BotContext) {
+    const supportTelegram = this.configService.get<string>('support.telegram') || '@Gexxx1';
+    
+    await this.safeEditOrReply(
+      ctx,
+      `❓ *FAQ — Помощь*\n\nВыберите вопрос:`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '📝 Как добавить задачу?', callback_data: 'faq_add_task' }],
+            [{ text: '⭐ Что такое XP и уровень?', callback_data: 'faq_xp' }],
+            [{ text: '🎤 Голосовые сообщения', callback_data: 'faq_voice' }],
+            [{ text: '🤖 Функция ИИ-помощник', callback_data: 'faq_ai' }],
+            [{ text: '⚙️ Настройка напоминаний', callback_data: 'faq_reminders' }],
+            [{ text: '🔒 Приватность данных', callback_data: 'faq_privacy' }],
+            [{ text: '💰 Реферальная система', callback_data: 'faq_referral' }],
+            [{ text: '📞 Связаться с поддержкой', url: `https://t.me/${supportTelegram.replace('@', '')}` }],
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+          ],
+        },
+      },
+    );
+  }
+
   private async showTasksMenu(ctx: BotContext) {
+    try {
+      const tasks = await this.taskService.findTasksByUserId(ctx.userId);
+      const user = await this.userService.findByTelegramId(ctx.userId);
 
-    const isToday = (date) => {
-      const today = new Date();
-      const compareDate = new Date(date);
-      
-      return compareDate.getDate() === today.getDate() &&
-            compareDate.getMonth() === today.getMonth() &&
-            compareDate.getFullYear() === today.getFullYear();
-    };
-
-    const user = await this.userService.findByTelegramId(ctx.userId);
-    const allTasks = await this.taskService.findTasksByUserId(user.id);
-    const filteredTasks = allTasks.filter(
-        (task) => task.status !== 'COMPLETED' || 
-                  (task.status === 'COMPLETED' && isToday(task.completedAt))
+      const pendingTasks = tasks.filter(
+        (task) => task.status === 'PENDING' || task.status === 'IN_PROGRESS',
+      );
+      const completedTasks = tasks.filter(
+        (task) => task.status === 'COMPLETED',
       );
 
-    const pendingTasks = filteredTasks.filter(
-      (task) => task.status !== 'COMPLETED',
-    );
-    const completedTasks = filteredTasks.filter(
-      (task) => task.status === 'COMPLETED',
-    );
+      let message = `📝 *Мои задачи*\n\n`;
+      
+      if (tasks.length === 0) {
+        message += `У вас пока нет задач.\n\n💡 Добавьте первую задачу, чтобы начать отслеживание!`;
+        
+        const keyboard = {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '➕ Добавить задачу', callback_data: 'tasks_add' }],
+              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+            ],
+          },
+        };
 
-    const totalTasks = filteredTasks.length;
+        await this.safeEditOrReply(ctx, message, keyboard);
+        return;
+      }
 
-    // Progress bar visualization (red -> yellow -> green)
-    const progressPercentage =
-      totalTasks > 0 ? (completedTasks.length / totalTasks) * 100 : 0;
-    let progressColor = '🔴';
-    let progressSquare = '🟥';
-    if (progressPercentage >= 30 && progressPercentage < 70) {
-      progressColor = '🟡';
-      progressSquare = '🟨';
-    } else if (progressPercentage >= 70) {
-      progressColor = '🟢';
-      progressSquare = '🟩';
-    }
+      message += `🔄 **К выполнению:** ${pendingTasks.length}\n`;
+      message += `✅ **Выполнено:** ${completedTasks.length}\n\n`;
 
-    const taskProgressBar =
-      progressSquare.repeat(completedTasks.length) +
-      '⬜'.repeat(Math.max(0, totalTasks - completedTasks.length));
-
-    let message = `📝 *Мои задачи*\n\n`;
-
-    message += `${progressColor} **Прогресс:** ${taskProgressBar} ${completedTasks.length}/${totalTasks}\n\n`;
-    message += `💎 **XP:** ${user.totalXp || 0} | 🏆 **Уровень:** ${user.level || 1}\n\n`;
-    message += `📅 **${new Date().toLocaleDateString('ru-RU')}**\n\n`;
-
-    // message += `🔥 **Всего задач выполнено:** ${user.completedTasks || 0}\n`;
-    message += `⭐ **Общий XP:** ${user.totalXp || 0}`;
-    
-    const keyboard = {
-      reply_markup: { 
-      inline_keyboard: [
-         ...filteredTasks
-        .map((task) => [
-          task.status === 'COMPLETED'?
-          (
-            {
-              text: `✅ ${task.title.substring(0, 45)}${task.title.length > 45 ? '...' : ''}`,
-              callback_data: `task_reopen_${task.id}`,
-            }
-          )
-          :
-          (
-            {
-            text: `⬜ ${task.title.substring(0, 30)}${task.title.length > 30 ? '...' : ''}     `,
-            callback_data: `task_complete_${task.id}`,
-            })
-        ]),
-        [
-        { text: '➕ Добавить', callback_data: 'tasks_add' },
-        {
-          text: '✏️ Редактировать', callback_data: 'edit_tasks_menu',
+      // Create keyboard with all tasks (like habits) - tasks stay in place when completed
+      // Tasks are shown in creation order, not sorted by status
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            ...tasks.map((task) => [
+              {
+                text: task.status === 'COMPLETED'
+                  ? `✅ ${task.title.substring(0, 30)}${task.title.length > 30 ? '...' : ''}`
+                  : `⬜ ${task.title.substring(0, 30)}${task.title.length > 30 ? '...' : ''}`,
+                callback_data: task.status === 'COMPLETED'
+                  ? `task_quick_cancel_${task.id}`
+                  : `task_quick_complete_${task.id}`,
+              },
+            ]),
+            [
+              { text: '➕ Добавить задачу', callback_data: 'tasks_add' },
+              { text: '📋 Все задачи', callback_data: 'tasks_list' },
+            ],
+            [{ text: '🤖 AI-совет по задачам', callback_data: 'tasks_ai_advice' }],
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+          ],
         },
-        ],
-        [{ text: '🤖 AI-совет по задачам', callback_data: 'tasks_ai_advice' }],
-        [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
-      ],
+      };
+
+      await this.safeEditOrReply(ctx, message, keyboard);
+    } catch (error) {
+      this.logger.error('Error showing tasks menu:', error);
+      const errorMessage = '❌ Произошла ошибка при загрузке задач. Попробуйте позже.';
+      const errorKeyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+          ],
+        },
+      };
+      await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
     }
-    };
-
-    
-
-    // Check if this is a callback query (can edit) or command (need to reply)
-    if (ctx.callbackQuery) {
-            try {
-              await ctx.editMessageTextWithMarkdown(message, keyboard);
-            } catch (error) {
-              // Fallback for photo messages - reply instead of edit
-              await ctx.replyWithMarkdown(message, keyboard);
-            }
-          } else {
-            await ctx.replyWithMarkdown(message, keyboard);
-          }
   }
 
   private async startAddingTask(ctx: BotContext) {
@@ -8324,7 +9534,8 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
     );
 
     if (!limitCheck.allowed) {
-      await ctx.replyWithMarkdown(
+      await this.safeEditOrReply(
+        ctx,
         limitCheck.message || '🚫 Превышен лимит задач',
         {
           reply_markup: {
@@ -8344,14 +9555,10 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
       return;
     }
 
-    await ctx.replyWithMarkdown(
-      `
-✨ **Давайте создадим задачу!**
-
-Просто **напишите** её или **отправьте голосовое** 🎙️ — я всё пойму.
-
-Жду вашу задачу 👇
-    `,
+    ctx.session.step = 'waiting_for_task_title';
+    await this.safeEditOrReply(
+      ctx,
+      `✨ *Давайте создадим задачу!*\n\nПросто напишите её или отправьте голосовое 🎤 — я всё пойму.\n\n*Жду вашу задачу* 👇`,
       {
         reply_markup: {
           inline_keyboard: [
@@ -8363,8 +9570,6 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
         },
       },
     );
-
-    ctx.session.step = 'waiting_for_task_title';
   }
 
   private async handleTaskCreation(ctx: BotContext, taskTitle: string) {
@@ -8836,21 +10041,20 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
       });
 
       // Просто обновляем список задач без показа сообщения
+      await ctx.answerCbQuery('✅ Задача выполнена!');
 
-      await this.showTasksMenu(ctx)
-
-      // // Определяем, где находимся, и обновляем соответствующий список
-      // const currentMessage = (ctx.callbackQuery?.message as any)?.text;
-      // if (currentMessage?.includes('Все активные задачи')) {
-      //   // Мы в общем списке всех задач
-      //   await this.showAllTasksList(ctx);
-      // } else if (currentMessage?.includes('Задачи на сегодня')) {
-      //   // Мы в списке задач на сегодня
-      //   await this.showTodayTasks(ctx);
-      // } else {
-      //   // По умолчанию возвращаемся к списку задач на сегодня
-      //   await this.showTodayTasks(ctx);
-      // }
+      // Определяем, где находимся, и обновляем соответствующий список
+      const currentMessage = (ctx.callbackQuery?.message as any)?.text;
+      if (currentMessage?.includes('Все активные задачи')) {
+        // Мы в общем списке всех задач
+        await this.showAllTasksList(ctx);
+      } else if (currentMessage?.includes('Задачи на сегодня')) {
+        // Мы в списке задач на сегодня
+        await this.showTodayTasks(ctx);
+      } else {
+        // По умолчанию возвращаемся к списку задач на сегодня
+        await this.showTodayTasks(ctx);
+      }
     } catch (error) {
       this.logger.error('Error completing task:', error);
       if (error.message.includes('already completed')) {
@@ -8858,6 +10062,80 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
       } else {
         await ctx.answerCbQuery('❌ Ошибка при выполнении задачи');
       }
+    }
+  }
+
+  private async quickCompleteTask(ctx: BotContext, taskId: string) {
+    try {
+      // Находим задачу и завершаем её
+      const task = await this.taskService.findTaskById(taskId, ctx.userId);
+      if (!task) {
+        await this.safeEditOrReply(ctx, '❌ Задача не найдена', {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+            ],
+          },
+        });
+        return;
+      }
+
+      // Завершаем задачу
+      const result = await this.taskService.completeTask(taskId, ctx.userId);
+
+      // Обновляем статистику пользователя
+      const userBefore = await this.userService.findByTelegramId(ctx.userId);
+      await this.userService.updateStats(ctx.userId, {
+        todayTasks: userBefore.todayTasks + 1,
+        xpGained: result.xpGained,
+      });
+
+      // Обновляем меню задач на месте (задачи остаются в том же порядке)
+      await this.showTasksMenu(ctx);
+    } catch (error) {
+      this.logger.error('Error in quickCompleteTask:', error);
+      await this.safeEditOrReply(ctx, '❌ Ошибка при выполнении задачи', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+          ],
+        },
+      });
+    }
+  }
+
+  private async quickCancelTask(ctx: BotContext, taskId: string) {
+    try {
+      // Находим задачу и отменяем выполнение
+      const task = await this.taskService.findTaskById(taskId, ctx.userId);
+      if (!task) {
+        await this.safeEditOrReply(ctx, '❌ Задача не найдена', {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+            ],
+          },
+        });
+        return;
+      }
+
+      // Отменяем выполнение задачи
+      await this.taskService.updateTask(taskId, ctx.userId, {
+        status: 'PENDING',
+        completedAt: null,
+      } as any);
+
+      // Обновляем меню задач на месте (задачи остаются в том же порядке)
+      await this.showTasksMenu(ctx);
+    } catch (error) {
+      this.logger.error('Error in quickCancelTask:', error);
+      await this.safeEditOrReply(ctx, '❌ Ошибка при отмене выполнения задачи', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+          ],
+        },
+      });
     }
   }
 
@@ -8877,15 +10155,22 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
   }
 
   private async askForTimezone(ctx: BotContext) {
-    // Попытаемся определить часовой пояс автоматически по IP
-    await ctx.replyWithMarkdown('🔍 *Определяю ваш часовой пояс...*');
+    // Редактируем существующее сообщение вместо создания нового
+    await this.safeEditOrReply(
+      ctx,
+      '🔍 *Определяю ваш часовой пояс...*',
+      {
+        parse_mode: 'Markdown',
+      },
+    );
 
     try {
       // Попробуем получить IP и определить локацию
       const ipTimezone = await this.detectTimezoneByIP();
 
       if (ipTimezone) {
-        await ctx.replyWithMarkdown(
+        await this.safeEditOrReply(
+          ctx,
           `
 🌍 *Автоматически определен часовой пояс*
 
@@ -8894,6 +10179,7 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
 
 Все верно?`,
           {
+            parse_mode: 'Markdown',
             reply_markup: {
               inline_keyboard: [
                 [
@@ -8921,12 +10207,14 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
   }
 
   private async showManualTimezoneSelection(ctx: BotContext) {
-    await ctx.replyWithMarkdown(
+    await this.safeEditOrReply(
+      ctx,
       `
 🌍 *Настройка часового пояса*
 
 Выберите удобный способ:`,
       {
+        parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: [
             [
@@ -8968,56 +10256,192 @@ ${habitsProgressBar}${pomodoroStatus}${userStats}
   }
 
   private async handleCityInput(ctx: BotContext, cityName: string) {
-    await ctx.replyWithMarkdown('🔍 *Определяю часовой пояс...*');
+    try {
+      // Редактируем существующее сообщение вместо создания нового
+      await this.safeEditOrReply(
+        ctx,
+        '🔍 *Определяю часовой пояс...*',
+        {
+          parse_mode: 'Markdown',
+        },
+      );
 
-    const result = await this.openaiService.getTimezoneByCity(cityName);
+      const result = await this.openaiService.getTimezoneByCity(cityName);
 
-    if (!result) {
-      await ctx.replyWithMarkdown(`
+      if (!result) {
+        await this.safeEditOrReply(
+          ctx,
+          `
 ❌ *Не удалось определить часовой пояс для города "${cityName}"*
 
 📍 Попробуйте еще раз. Напишите название города более точно:
-      `);
-      return;
-    }
+        `,
+          {
+            parse_mode: 'Markdown',
+          },
+        );
+        return;
+      }
 
-    // Save timezone and city to database
-    await this.userService.updateUser(ctx.userId, {
-      timezone: result.timezone,
-      city: result.normalizedCity,
-    });
+      // Save timezone and city to database
+      await this.userService.updateUser(ctx.userId, {
+        timezone: result.timezone,
+        city: result.normalizedCity,
+      });
 
-    await ctx.replyWithMarkdown(`
+      // Reset session step
+      ctx.session.step = undefined;
+
+      // Экранируем markdown символы
+      const escapeMarkdown = (text: string): string => {
+        if (!text) return '';
+        return text
+          .replace(/\_/g, '\\_')
+          .replace(/\*/g, '\\*')
+          .replace(/\[/g, '\\[')
+          .replace(/\]/g, '\\]')
+          .replace(/\(/g, '\\(')
+          .replace(/\)/g, '\\)');
+      };
+
+      const safeCity = escapeMarkdown(result.normalizedCity);
+      const safeTimezone = escapeMarkdown(result.timezone);
+
+      // Продолжить с тем действием, которое пользователь хотел сделать
+      if (ctx.session.pendingAction === 'adding_task') {
+        ctx.session.pendingAction = undefined;
+        await this.safeEditOrReply(
+          ctx,
+          `
 ✅ *Часовой пояс установлен!*
 
-🏙️ Город: ${result.normalizedCity}
-🕐 Часовой пояс: ${result.timezone}
+🏙️ Город: ${safeCity}
+🕐 Часовой пояс: ${safeTimezone}
 
-Теперь можете продолжить создание задачи или привычки!
-    `);
+Теперь можете продолжить создание задачи!
+        `,
+          {
+            parse_mode: 'Markdown',
+          },
+        );
+        await this.startAddingTask(ctx);
+      } else if (ctx.session.pendingAction === 'adding_habit') {
+        ctx.session.pendingAction = undefined;
+        ctx.session.step = 'adding_habit';
+        await this.safeEditOrReply(
+          ctx,
+          `
+✅ *Часовой пояс установлен!*
 
-    // Reset session step
-    ctx.session.step = undefined;
+🏙️ Город: ${safeCity}
+🕐 Часовой пояс: ${safeTimezone}
 
-    // Продолжить с тем действием, которое пользователь хотел сделать
-    if (ctx.session.pendingAction === 'adding_task') {
-      ctx.session.pendingAction = undefined;
-      await this.startAddingTask(ctx);
-    } else if (ctx.session.pendingAction === 'adding_habit') {
-      ctx.session.pendingAction = undefined;
-      ctx.session.step = 'adding_habit';
-      await ctx.replyWithMarkdown(
-        '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычки, которую хотите отслеживать, в поле для ввода ниже*',
+Теперь можете продолжить создание привычки!
+        `,
+          {
+            parse_mode: 'Markdown',
+          },
+        );
+        await this.safeEditOrReply(
+          ctx,
+          '🔄 *Добавление привычки*\n\n⬇️ *Введите название привычки, которую хотите отслеживать, в поле для ввода ниже*',
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🔙 Назад в меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+      } else if (ctx.session.pendingAction === 'editing_profile_timezone') {
+        ctx.session.pendingAction = undefined;
+        await this.safeEditOrReply(
+          ctx,
+          `
+✅ *Часовой пояс обновлен!*
+
+🏙️ Город: ${safeCity}
+🕐 Часовой пояс: ${safeTimezone}
+        `,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '⬅️ Назад к редактированию', callback_data: 'edit_profile' }],
+                [{ text: '👤 Профиль', callback_data: 'user_profile' }],
+              ],
+            },
+          },
+        );
+      } else if (ctx.session.pendingAction === 'editing_privacy_timezone') {
+        ctx.session.pendingAction = undefined;
+        await this.safeEditOrReply(
+          ctx,
+          `
+✅ *Часовой пояс обновлен!*
+
+🏙️ Город: ${safeCity}
+🕐 Часовой пояс: ${safeTimezone}
+        `,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '⬅️ Назад к настройкам приватности',
+                    callback_data: 'settings_privacy',
+                  },
+                ],
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+      } else {
+        await this.safeEditOrReply(
+          ctx,
+          `
+✅ *Часовой пояс установлен!*
+
+🏙️ Город: ${safeCity}
+🕐 Часовой пояс: ${safeTimezone}
+
+Теперь можете создавать задачи и привычки!
+        `,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+      }
+    } catch (error) {
+      this.logger.error('Error handling city input:', error);
+      await this.safeEditOrReply(
+        ctx,
+        '❌ *Произошла ошибка при установке часового пояса*\n\nПопробуйте еще раз или обратитесь в поддержку.',
         {
+          parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [
-              [{ text: '🔙 Назад в меню', callback_data: 'back_to_menu' }],
+              [
+                {
+                  text: '⬅️ Назад',
+                  callback_data: ctx.session.pendingAction === 'editing_privacy_timezone' 
+                    ? 'settings_privacy' 
+                    : 'back_to_menu',
+                },
+              ],
+              [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
             ],
           },
         },
       );
-    } else {
-      await this.showMainMenu(ctx);
     }
   }
 
@@ -9254,42 +10678,33 @@ ${ratingEmoji} Ваша оценка: ${rating}/5
     ctx.session.feedbackLiked = undefined;
   }
 
-  private async startAIChat(ctx: BotContext) {
-    
-    // 🔧 Проверяем лимит AI запросов
-    const aiLimitCheck = await this.subscriptionService.checkLimit(
+  private async showAIChatMenu(ctx: BotContext) {
+    try {
+      // Проверяем, является ли пользователь администратором
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.userId;
+      const isAdmin = adminIds.includes(userId);
+
+      // 🔧 Проверяем лимит AI запросов только для не-администраторов
+      let aiLimitCheck;
+      if (isAdmin) {
+        aiLimitCheck = {
+          current: 0,
+          limit: -1,
+          remaining: -1,
+          allowed: true,
+        };
+      } else {
+        aiLimitCheck = await this.subscriptionService.checkLimit(
       ctx.userId,
       'aiRequests',
     );
-    if (!aiLimitCheck.allowed) {
-      
-      const limitMessage = this.subscriptionService.getLimitMessage(
-        'aiRequests',
-        aiLimitCheck.current,
-        aiLimitCheck.limit,
-      );
+      }
 
-      await ctx.replyWithMarkdown(limitMessage, {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '💎 Получить Premium', callback_data: 'get_premium' }],
-            [{ text: '📊 Мои лимиты', callback_data: 'subscription_status' }],
-            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
-          ],
-        },
-      });
-      return;
-    }
+      let message = `🧠 *ИИ Консультант*\n\n`;
+      message += `📊 **Использование:** ${isAdmin ? '♾️ (Админ - безлимит)' : `${aiLimitCheck.current}/${aiLimitCheck.limit === -1 ? '♾️' : aiLimitCheck.limit} запросов${aiLimitCheck.limit !== -1 ? ` (осталось: ${aiLimitCheck.remaining})` : ''}`}\n\n`;
 
-    await ctx.replyWithMarkdown(
-      `
-🧠 *ИИ Консультант*
-
-Выберите тему или задайте вопрос:
-
-📊 **Использование:** ${aiLimitCheck.current}/${aiLimitCheck.limit === -1 ? '♾️' : aiLimitCheck.limit} запросов${aiLimitCheck.limit !== -1 ? ` (осталось: ${aiLimitCheck.remaining})` : ''}
-    `,
-      {
+      const keyboard = {
         reply_markup: {
           inline_keyboard: [
             [
@@ -9316,17 +10731,28 @@ ${ratingEmoji} Ваша оценка: ${rating}/5
                 callback_data: 'ai_custom_question',
               },
             ],
-            [{ text: '⬅️ Назад в меню', callback_data: 'back_to_menu' }],
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
           ],
         },
-      },
-    );
+      };
 
-    // Set AI chat mode
-    ctx.session.aiChatMode = true;
+      await this.safeEditOrReply(ctx, message, keyboard);
+
+      // НЕ устанавливаем aiChatMode здесь - режим активируется только при выборе "Свой вопрос"
+    } catch (error) {
+      this.logger.error('Error showing AI chat menu:', error);
+      await ctx.replyWithMarkdown('❌ Произошла ошибка. Попробуйте позже.');
+    }
+  }
+
+  private async startAIChat(ctx: BotContext) {
+    await this.showAIChatMenu(ctx);
   }
 
   private async handleAIAnalyzeProfile(ctx: BotContext) {
+    // Активируем режим ИИ-чата для продолжения диалога
+    ctx.session.aiChatMode = true;
+    
     const user = await this.userService.findByTelegramId(ctx.userId);
     const tasks = await this.taskService.findTasksByUserId(ctx.userId);
     const completedTasks = tasks.filter((task) => task.completedAt !== null);
@@ -9348,30 +10774,19 @@ ${ratingEmoji} Ваша оценка: ${rating}/5
       status = '🚀 Опытный пользователь - отличные результаты!';
     }
 
-    await ctx.editMessageTextWithMarkdown(
-      `
-📊 *Анализ профиля*
-
-${status}
-
-**Статистика:**
-⭐ Опыт: ${user.totalXp} XP (уровень ${user.level})
-📅 С ботом: ${accountDays} дней
-📝 Задач создано: ${tasks.length}
-✅ Выполнено: ${completedTasks.length} (${completionRate}%)
-
-**Рекомендация:**
-${
+    await this.safeEditOrReply(
+      ctx,
+      `📊 *Анализ профиля*\n\n${status}\n\n**Статистика:**\n⭐ Опыт: ${user.totalXp} XP (уровень ${user.level})\n📅 С ботом: ${accountDays} дней\n📝 Задач создано: ${tasks.length}\n✅ Выполнено: ${completedTasks.length} (${completionRate}%)\n\n**Рекомендация:**\n${
   completionRate > 70
     ? '🎯 Отлично! Попробуйте более сложные цели.'
     : completionRate > 40
       ? '💪 Хорошо! Сфокусируйтесь на завершении задач.'
-      : '� Начните с малого - одна задача в день!'
-}
-      `,
+            : '💡 Начните с малого - одна задача в день!'
+      }\n\n💬 *Можете задать мне любой вопрос!*`,
       {
         reply_markup: {
           inline_keyboard: [
+            [{ text: '💬 Задать вопрос', callback_data: 'ai_continue_chat' }],
             [{ text: '⬅️ Назад к ИИ меню', callback_data: 'ai_back_menu' }],
             [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
           ],
@@ -9386,7 +10801,13 @@ ${
       return;
     }
     try {
-      // 🔧 Проверяем лимит AI запросов с новой системой подписок
+      // Проверяем, является ли пользователь администратором
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const userId = ctx.userId;
+      const isAdmin = adminIds.includes(userId);
+
+      // 🔧 Проверяем лимит AI запросов только для не-администраторов
+      if (!isAdmin) {
       const aiLimitCheck = await this.subscriptionService.checkLimit(
         ctx.userId,
         'aiRequests',
@@ -9408,153 +10829,151 @@ ${
           },
         });
         return;
+        }
       }
 
-      // Check if this is a reminder request
-      const absoluteTimePatterns = [
+      // В режиме ИИ-чата обрабатываем только явные запросы на напоминания с временем
+      // Остальные сообщения отправляем в OpenAI
+      const explicitReminderPatterns = [
         /напомни\s+мне\s+(.+?)\s+в\s+(\d{1,2}):(\d{2})/i,
         /напомни\s+(.+?)\s+в\s+(\d{1,2}):(\d{2})/i,
         /напоминание\s+(.+?)\s+в\s+(\d{1,2}):(\d{2})/i,
         /поставь\s+напоминание\s+(.+?)\s+на\s+(\d{1,2}):(\d{2})/i,
-      ];
-
-      const relativeTimePatterns = [
         /напомни\s+мне\s+(.+?)\s+через\s+(\d+)\s+минут/i,
         /напомни\s+(.+?)\s+через\s+(\d+)\s+минут/i,
-        /напоминание\s+(.+?)\s+через\s+(\d+)\s+минут/i,
-        // Добавляем поддержку "через минуту", "через час"
-        /напомни\s+мне\s+(.+?)\s+через\s+минуту/i,
-        /напомни\s+(.+?)\s+через\s+минуту/i,
-        /напоминание\s+(.+?)\s+через\s+минуту/i,
-        /напомни\s+мне\s+(.+?)\s+через\s+час/i,
-        /напомни\s+(.+?)\s+через\s+час/i,
-        /напоминание\s+(.+?)\s+через\s+час/i,
-        // Простые паттерны без "напомни"
-        /^(.+?)\s+через\s+минуту$/i,
-        /^(.+?)\s+через\s+час$/i,
-        /^(.+?)\s+через\s+(\d+)\s+минут$/i,
-        /^(.+?)\s+через\s+(\d+)\s+часа?$/i,
-      ];
-
-      const intervalPatterns = [
         /напоминай\s+(.+?)\s+каждые?\s+(\d+)\s+(минут|час|часа|часов)/i,
-        /напомни\s+(.+?)\s+каждые?\s+(\d+)\s+(минут|час|часа|часов)/i,
-        /(.+?)\s+каждые?\s+(\d+)\s+(минут|час|часа|часов)/i,
       ];
 
-      // Check interval patterns first
-      let reminderMatch: RegExpMatchArray | null = null;
-      for (const pattern of intervalPatterns) {
-        reminderMatch = message.match(pattern);
-        if (reminderMatch) {
-          const [, reminderText, amount, unit] = reminderMatch;
-          let intervalMinutes = 0;
-
-          if (unit.includes('минут')) {
-            intervalMinutes = parseInt(amount);
-          } else if (unit.includes('час')) {
-            intervalMinutes = parseInt(amount) * 60;
-          }
-
-          if (intervalMinutes >= 1 && intervalMinutes <= 1440) {
-            await this.handleIntervalReminder(
-              ctx,
-              reminderText.trim(),
-              intervalMinutes,
-            );
-            return;
-          }
+      // Проверяем только явные запросы на напоминания
+      let isExplicitReminder = false;
+      for (const pattern of explicitReminderPatterns) {
+        if (pattern.test(message)) {
+          isExplicitReminder = true;
+          break;
         }
       }
 
-      // Check absolute time
-      for (const pattern of absoluteTimePatterns) {
-        reminderMatch = message.match(pattern);
-        if (reminderMatch) {
-          const [, reminderText] = reminderMatch;
-          await this.askForReminderTime(ctx, reminderText.trim());
-          return;
-        }
+      // Если это явный запрос на напоминание, обрабатываем его
+      if (isExplicitReminder) {
+        // Обрабатываем как напоминание (можно оставить текущую логику или упростить)
+        // Но в режиме ИИ-чата лучше всё равно отвечать через ИИ
       }
 
-      // Check relative time
-      for (const pattern of relativeTimePatterns) {
-        reminderMatch = message.match(pattern);
-        if (reminderMatch) {
-          const [, reminderText] = reminderMatch;
-          await this.askForReminderTime(ctx, reminderText.trim());
-          return;
-        }
-      }
+      // Показываем индикатор загрузки
+      const loadingMessage = await ctx.replyWithMarkdown('🤔 *Анализирую ваш вопрос...*');
 
-      await ctx.replyWithMarkdown('🤔 *Анализирую ваш вопрос...*');
+      try {
+        // Определяем тип сообщения на основе вопроса пользователя
+        const lowerMessage = message.toLowerCase();
+        let messageType: 'motivation' | 'task_suggestion' | 'habit_advice' | 'mood_analysis' | 'focus_tips' | 'dependency_help' = 'motivation';
+        
+        // Приоритет: dependency_help (вредные привычки) > habit_advice (полезные привычки) > остальное
+        if (lowerMessage.includes('курить') || lowerMessage.includes('бросить') || lowerMessage.includes('перестал') || 
+            lowerMessage.includes('избавит') || lowerMessage.includes('зависимост') || lowerMessage.includes('алкогол') ||
+            lowerMessage.includes('наркотик') || lowerMessage.includes('игр') && lowerMessage.includes('зависим')) {
+          messageType = 'dependency_help';
+        } else if (lowerMessage.includes('привычк') && !lowerMessage.includes('бросить') && !lowerMessage.includes('курить')) {
+          messageType = 'habit_advice';
+        } else if (lowerMessage.includes('задач') || lowerMessage.includes('дела') || lowerMessage.includes('планир') || lowerMessage.includes('продуктивн')) {
+          messageType = 'task_suggestion';
+        } else if (lowerMessage.includes('настроен') || lowerMessage.includes('эмоц') || lowerMessage.includes('чувств')) {
+          messageType = 'mood_analysis';
+        } else if (lowerMessage.includes('фокус') || lowerMessage.includes('концентрац') || lowerMessage.includes('вниман')) {
+          messageType = 'focus_tips';
+        }
 
       // Получаем персонализированный ответ через AI Context Service
       const personalizedResponse =
         await this.aiContextService.generatePersonalizedMessage(
           ctx.userId,
-          'motivation',
-          `${message}. Ответь кратко, до 100 слов, конкретно и по делу.`,
+            messageType,
+            `${message}\n\nОтветь кратко, до 200 слов, конкретно и по делу. Учитывай контекст пользователя из системного промпта. Если вопрос не связан напрямую с продуктивностью, задачами или привычками, дай полезный совет в контексте саморазвития и личностного роста.`,
         );
 
-      // Проверка: не похоже ли сообщение на задачу или напоминание
-
-      // 🔧 Увеличиваем счетчик использования AI в новой системе
+        // 🔧 Увеличиваем счетчик использования AI только для не-администраторов
+        if (!isAdmin) {
       await this.subscriptionService.incrementUsage(ctx.userId, 'aiRequests');
+        }
 
-      // Get current usage for display
-      const usageInfo = await this.subscriptionService.checkLimit(
+        // Get current usage for display (для админов показываем бесконечность)
+        let usageInfo;
+        if (isAdmin) {
+          usageInfo = {
+            current: 0,
+            limit: -1,
+            remaining: -1,
+            allowed: true,
+          };
+        } else {
+          usageInfo = await this.subscriptionService.checkLimit(
         ctx.userId,
         'aiRequests',
       );
+        }
 
-      await ctx.replyWithMarkdown(
-        `
-🧠 *ИИ отвечает:*
+        const responseMessage = `🧠 *ИИ отвечает:*\n\n${personalizedResponse}\n\n📊 ИИ-запросов: ${isAdmin ? '♾️ (Админ - безлимит)' : `${usageInfo.current}${usageInfo.limit === -1 ? '/♾️' : `/${usageInfo.limit}`} (осталось: ${usageInfo.remaining === -1 ? '♾️' : usageInfo.remaining})`}`;
 
-${personalizedResponse}
-
-📊 ИИ-запросов: ${usageInfo.current}${usageInfo.limit === -1 ? '/♾️' : `/${usageInfo.limit}`} (осталось: ${usageInfo.remaining === -1 ? '♾️' : usageInfo.remaining})
-      `,
-        {
+        const responseKeyboard = {
           reply_markup: {
             inline_keyboard: [
+              [{ text: '💬 Задать еще вопрос', callback_data: 'ai_continue_chat' }],
               [{ text: '⬅️ Назад к ИИ меню', callback_data: 'ai_back_menu' }],
               [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
-              [{ text: '🚪 Выйти из ИИ-чата', callback_data: 'exit_ai_chat' }],
             ],
           },
-        },
-      );
-      // Регистрируем обработчик выхода из ИИ-чата
-      this.bot.action('exit_ai_chat', async (ctx) => {
-        ctx.session.aiChatMode = false;
-        await ctx.editMessageTextWithMarkdown(
-          '🧠 Режим ИИ-чата завершён. Вы можете продолжить работу через главное меню.',
-          {
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
-              ],
-            },
-          },
-        );
-      });
-    } catch (error) {
-      await ctx.replyWithMarkdown(
-        `
-❌ *Ошибка ИИ-консультанта*
+        };
 
-Извините, сейчас не могу ответить на ваш вопрос. Попробуйте позже или задайте другой вопрос.
-      `,
-        {
+        // Удаляем сообщение о загрузке и отправляем ответ
+        try {
+          if (loadingMessage && 'message_id' in loadingMessage) {
+            await ctx.deleteMessage(loadingMessage.message_id);
+          }
+        } catch (deleteErr) {
+          // Игнорируем ошибку удаления
+        }
+
+        await ctx.replyWithMarkdown(responseMessage, responseKeyboard);
+      } catch (aiError) {
+        // Удаляем сообщение о загрузке при ошибке
+        try {
+          if (loadingMessage && 'message_id' in loadingMessage) {
+            await ctx.deleteMessage(loadingMessage.message_id);
+          }
+        } catch (deleteErr) {
+          // Игнорируем ошибку удаления
+        }
+        throw aiError;
+      }
+    } catch (error) {
+      this.logger.error('Error in handleAIChatMessage:', error);
+      
+      // Проверяем тип ошибки OpenAI
+      let errorMessage = '❌ *Ошибка ИИ-консультанта*\n\n';
+      
+      if (error instanceof Error) {
+        if (error.message.includes('unsupported_country_region_territory') || 
+            error.message.includes('Country, region, or territory not supported')) {
+          errorMessage += '⚠️ OpenAI API недоступен в вашем регионе.\n\n';
+          errorMessage += 'Пожалуйста, используйте VPN или обратитесь к администратору.';
+        } else if (error.message.includes('API key')) {
+          errorMessage += '⚠️ Проблема с API ключом OpenAI.\n\n';
+          errorMessage += 'Пожалуйста, обратитесь к администратору.';
+        } else {
+          errorMessage += 'Извините, сейчас не могу ответить на ваш вопрос.\n\n';
+          errorMessage += 'Попробуйте позже или задайте другой вопрос.';
+        }
+      } else {
+        errorMessage += 'Извините, произошла ошибка. Попробуйте позже.';
+      }
+      
+      await ctx.replyWithMarkdown(errorMessage, {
           reply_markup: {
             inline_keyboard: [
               [{ text: '⬅️ Назад к ИИ меню', callback_data: 'ai_back_menu' }],
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
             ],
           },
-        },
-      );
+      });
     }
   }
 
@@ -11734,7 +13153,6 @@ _Просто напишите время в удобном формате_
               ],
               [{ text: '🎯 Мои привычки', callback_data: 'habits_list' }],
               [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
-              [{ text: '❓ Что еще я умею?', callback_data: 'faq_support' }],
             ],
           },
         });
@@ -11798,7 +13216,16 @@ _Просто напишите время в удобном формате_
 
   private async showTasksAIAdvice(ctx: BotContext) {
     try {
-      await ctx.editMessageTextWithMarkdown('🤔 *Анализирую ваши задачи...*');
+      // Показываем сообщение о загрузке
+      const loadingMessage = '🤔 *Анализирую ваши задачи...*';
+      const loadingKeyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⏳ Ожидайте...', callback_data: 'noop' }],
+          ],
+        },
+      };
+      await this.safeEditOrReply(ctx, loadingMessage, loadingKeyboard);
 
       // Получаем персонализированный совет по задачам
       const aiAdvice = await this.aiContextService.generatePersonalizedMessage(
@@ -11807,45 +13234,43 @@ _Просто напишите время в удобном формате_
         '',
       );
 
-      await ctx.editMessageTextWithMarkdown(
-        `
-🤖 *AI-совет по задачам:*
-
-${aiAdvice}
-
-💡 *Хотите ещё советы?* Просто напишите мне в чат!
-        `,
-        {
+      const message = `🤖 *AI-совет по задачам:*\n\n${aiAdvice}\n\n💡 *Хотите ещё советы?* Просто напишите мне в чат!`;
+      const keyboard = {
           reply_markup: {
             inline_keyboard: [
               [{ text: '📝 Добавить задачу', callback_data: 'tasks_add' }],
               [{ text: '🔙 Назад к меню задач', callback_data: 'menu_tasks' }],
             ],
           },
-        },
-      );
+      };
+
+      await this.safeEditOrReply(ctx, message, keyboard);
     } catch (error) {
       this.logger.error('Error getting AI advice for tasks:', error);
-      await ctx.editMessageTextWithMarkdown(
-        `
-❌ *Не удалось получить AI-совет*
-
-Попробуйте позже или напишите мне напрямую в чат!
-        `,
-        {
+      const errorMessage = '❌ *Не удалось получить AI-совет*\n\nПопробуйте позже или напишите мне напрямую в чат!';
+      const errorKeyboard = {
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔙 Назад к меню задач', callback_data: 'menu_tasks' }],
             ],
           },
-        },
-      );
+      };
+      await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
     }
   }
 
   private async showHabitsAIAdvice(ctx: BotContext) {
     try {
-      await ctx.editMessageTextWithMarkdown('🤔 *Анализирую ваши привычки...*');
+      // Показываем сообщение о загрузке
+      const loadingMessage = '🤔 *Анализирую ваши привычки...*';
+      const loadingKeyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '⏳ Ожидайте...', callback_data: 'noop' }],
+          ],
+        },
+      };
+      await this.safeEditOrReply(ctx, loadingMessage, loadingKeyboard);
 
       // Получаем персонализированный совет по привычкам
       const aiAdvice = await this.aiContextService.generatePersonalizedMessage(
@@ -11854,38 +13279,27 @@ ${aiAdvice}
         '',
       );
 
-      await ctx.editMessageTextWithMarkdown(
-        `
-🤖 *AI-совет по привычкам:*
-
-${aiAdvice}
-
-💡 *Хотите ещё советы?* Просто напишите мне в чат!
-        `,
-        {
+      const message = `🤖 *AI-совет по привычкам:*\n\n${aiAdvice}\n\n💡 *Хотите ещё советы?* Просто напишите мне в чат!`;
+      const keyboard = {
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔙 Назад к привычкам', callback_data: 'menu_habits' }],
             ],
           },
-        },
-      );
+      };
+
+      await this.safeEditOrReply(ctx, message, keyboard);
     } catch (error) {
       this.logger.error('Error getting AI advice for habits:', error);
-      await ctx.editMessageTextWithMarkdown(
-        `
-❌ *Не удалось получить AI-совет*
-
-Попробуйте позже или напишите мне напрямую в чат!
-        `,
-        {
+      const errorMessage = '❌ *Не удалось получить AI-совет*\n\nПопробуйте позже или напишите мне напрямую в чат!';
+      const errorKeyboard = {
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔙 Назад к привычкам', callback_data: 'menu_habits' }],
             ],
           },
-        },
-      );
+      };
+      await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
     }
   }
 
@@ -11911,11 +13325,7 @@ ${aiAdvice}
             },
           };
 
-          if (ctx.callbackQuery) {
-            await ctx.replyWithMarkdown(message, keyboard);
-          } else {
-            await ctx.replyWithMarkdown(message, keyboard);
-          }
+          await this.safeEditOrReply(ctx, message, keyboard);
         } else {
           let message = `🎯 *Мои привычки*\n\n`;
 
@@ -12011,16 +13421,7 @@ ${aiAdvice}
             },
           };
 
-          if (ctx.callbackQuery) {
-            try {
-              await ctx.editMessageTextWithMarkdown(message, keyboard);
-            } catch (error) {
-              // Fallback for photo messages - reply instead of edit
-              await ctx.replyWithMarkdown(message, keyboard);
-            }
-          } else {
-            await ctx.replyWithMarkdown(message, keyboard);
-          }
+          await this.safeEditOrReply(ctx, message, keyboard);
         }
       } catch (error) {
         this.logger.error(`Error fetching habits: ${error}`);
@@ -12211,12 +13612,7 @@ ${aiAdvice}
       },
     };
 
-    // Check if this is a callback query (can edit) or command (need to reply)
-    if (ctx.callbackQuery) {
-      await ctx.editMessageTextWithMarkdown(message, keyboard);
-    } else {
-      await ctx.replyWithMarkdown(message, keyboard);
-    }
+    await this.safeEditOrReply(ctx, message, keyboard);
   }
 
   private async showMoodAIAnalysis(ctx: BotContext) {
@@ -12318,13 +13714,7 @@ ${aiAnalysis}
           ],
         };
 
-        if (ctx.callbackQuery) {
-          await ctx.editMessageTextWithMarkdown(message, {
-            reply_markup: keyboard,
-          });
-        } else {
-          await ctx.replyWithMarkdown(message, { reply_markup: keyboard });
-        }
+        await this.safeEditOrReply(ctx, message, keyboard);
         return;
       }
 
@@ -12384,13 +13774,7 @@ ${aiAnalysis}
         ],
       };
 
-      if (ctx.callbackQuery) {
-        await ctx.editMessageTextWithMarkdown(message, {
-          reply_markup: keyboard,
-        });
-      } else {
-        await ctx.replyWithMarkdown(message, { reply_markup: keyboard });
-      }
+      await this.safeEditOrReply(ctx, message, keyboard);
     } catch (error) {
       this.logger.error(`Error fetching reminders: ${error}`);
 
@@ -12408,13 +13792,10 @@ ${aiAnalysis}
         },
       };
 
-      if (ctx.callbackQuery) {
-        await ctx.editMessageTextWithMarkdown(errorMessage, errorKeyboard);
-      } else {
-        await ctx.replyWithMarkdown(errorMessage, errorKeyboard);
-      }
+      await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
     }
   }
+
 
   private async showAllReminders(ctx: BotContext) {
     try {
@@ -13031,27 +14412,26 @@ ${plan.features.map((feature) => `• ${feature}`).join('\n')}
       );
     } catch (error) {
       this.logger.error('Error creating payment:', error);
-      await ctx.editMessageTextWithMarkdown(
-        `
-❌ *Ошибка создания платежа*
-
-Попробуйте позже или свяжитесь с поддержкой.
-        `,
-        {
+      const errorMessage = error instanceof Error && error.message.includes('not initialized')
+        ? '❌ *Сервис оплаты не настроен*\n\nПожалуйста, обратитесь к администратору.'
+        : '❌ *Ошибка создания платежа*\n\nПопробуйте позже или свяжитесь с поддержкой.';
+      
+      const errorKeyboard = {
           reply_markup: {
             inline_keyboard: [
               [{ text: '⬅️ Назад', callback_data: 'upgrade_premium' }],
             ],
           },
-        },
-      );
+      };
+
+      await this.safeEditOrReply(ctx, errorMessage, errorKeyboard);
     }
   }
 
   /**
    * Безопасно получает пользователя, создавая его при необходимости
    */
-  private async getOrCreateUser(ctx: BotContext): Promise<User> {
+  private async getOrCreateUser(ctx: BotContext) {
     try {
       return await this.userService.findByTelegramId(ctx.userId);
     } catch (error) {
@@ -13171,7 +14551,7 @@ ${this.getItemActivationMessage(itemType)}`,
    * Check if user already owns a specific item
    */
   private checkIfUserOwnsItem(
-    user: User,
+    user: Awaited<ReturnType<typeof this.userService.findByTelegramId>>,
     itemType: string,
     itemId: string,
   ): boolean {
@@ -13194,11 +14574,11 @@ ${this.getItemActivationMessage(itemType)}`,
    * Process the actual purchase and update user data
    */
   private async processXPPurchase(
-    user: User,
+    user: Awaited<ReturnType<typeof this.userService.findByTelegramId>>,
     itemType: string,
     itemId: string,
   ): Promise<void> {
-    const updateData: Partial<User> = {};
+    const updateData: Partial<Awaited<ReturnType<typeof this.userService.findByTelegramId>>> = {};
 
     switch (itemType) {
       case 'theme':
@@ -13288,7 +14668,7 @@ ${this.getItemActivationMessage(itemType)}`,
 
       // Проверяем, выполнены ли все привычки
       const allHabits = await this.habitService.findHabitsByUserId(ctx.userId);
-      const allCompleted = allHabits.every((h) => this.habitService.isCompletedToday(h)); // Simplified check
+      const allCompleted = allHabits.every((h) => h.currentStreak > 0); // Simplified check
 
       // Обновляем меню привычек с анимацией
       await this.showHabitsMenu(ctx);
@@ -14036,6 +15416,14 @@ ${this.getItemActivationMessage(itemType)}`,
 
       await this.habitService.deleteHabit(habitId, ctx.userId);
 
+      // Уменьшаем счетчик использования при удалении привычки
+      try {
+        await this.billingService.decrementUsage(ctx.userId, 'dailyHabits');
+      } catch (error) {
+        this.logger.warn('Error decrementing habit usage:', error);
+        // Не прерываем процесс удаления, если ошибка с счетчиком
+      }
+
       await ctx.editMessageTextWithMarkdown(
         `
 ✅ *Привычка удалена*
@@ -14075,9 +15463,40 @@ ${this.getItemActivationMessage(itemType)}`,
 
   private async confirmTimezone(ctx: BotContext, timezone: string) {
     try {
-      // Сохраняем часовой пояс в базу данных
+      // Маппинг часовых поясов на основные города
+      const timezoneToCity: Record<string, string> = {
+        'Europe/Moscow': 'Москва',
+        'Europe/Samara': 'Самара',
+        'Asia/Yekaterinburg': 'Екатеринбург',
+        'Asia/Vladivostok': 'Владивосток',
+        'Europe/Kaliningrad': 'Калининград',
+        'Asia/Omsk': 'Омск',
+        'Asia/Novosibirsk': 'Новосибирск',
+        'Asia/Krasnoyarsk': 'Красноярск',
+        'Asia/Irkutsk': 'Иркутск',
+        'Asia/Yakutsk': 'Якутск',
+        'Asia/Magadan': 'Магадан',
+        'Asia/Kamchatka': 'Петропавловск-Камчатский',
+        'Europe/Kiev': 'Киев',
+        'Europe/Minsk': 'Минск',
+        'Asia/Almaty': 'Алматы',
+        'Asia/Tashkent': 'Ташкент',
+        'Asia/Dubai': 'Дубай',
+        'Asia/Shanghai': 'Пекин',
+        'Asia/Tokyo': 'Токио',
+        'Europe/London': 'Лондон',
+        'Europe/Berlin': 'Берлин',
+        'America/New_York': 'Нью-Йорк',
+        'America/Los_Angeles': 'Лос-Анджелес',
+      };
+
+      // Определяем город по часовому поясу
+      const city = timezoneToCity[timezone] || null;
+
+      // Сохраняем часовой пояс и город в базу данных
       await this.userService.updateUser(ctx.userId, {
         timezone: timezone,
+        city: city, // Обновляем город при выборе часового пояса
       });
 
       await ctx.editMessageTextWithMarkdown(`
@@ -14108,6 +15527,69 @@ ${this.getItemActivationMessage(itemType)}`,
             },
           },
         );
+      } else if (ctx.session.pendingAction === 'editing_profile_timezone') {
+        ctx.session.pendingAction = undefined;
+        // Экранируем markdown символы
+        const escapeMarkdown = (text: string): string => {
+          if (!text) return '';
+          return text
+            .replace(/\_/g, '\\_')
+            .replace(/\*/g, '\\*')
+            .replace(/\[/g, '\\[')
+            .replace(/\]/g, '\\]')
+            .replace(/\(/g, '\\(')
+            .replace(/\)/g, '\\)');
+        };
+        const cityDisplay = city ? `\n🏙️ Город: ${escapeMarkdown(city)}` : '';
+        await this.safeEditOrReply(
+          ctx,
+          `✅ *Часовой пояс обновлен!*
+
+🕐 Часовой пояс: ${escapeMarkdown(timezone)}${cityDisplay}`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '⬅️ Назад к редактированию', callback_data: 'edit_profile' }],
+                [{ text: '👤 Профиль', callback_data: 'user_profile' }],
+              ],
+            },
+          },
+        );
+      } else if (ctx.session.pendingAction === 'editing_privacy_timezone') {
+        ctx.session.pendingAction = undefined;
+        // Экранируем markdown символы для отображения
+        const escapeMarkdown = (text: string): string => {
+          if (!text) return '';
+          return text
+            .replace(/\_/g, '\\_')
+            .replace(/\*/g, '\\*')
+            .replace(/\[/g, '\\[')
+            .replace(/\]/g, '\\]')
+            .replace(/\(/g, '\\(')
+            .replace(/\)/g, '\\)');
+        };
+        // Используем обновленное значение города
+        await this.safeEditOrReply(
+          ctx,
+          `✅ *Часовой пояс обновлен!*
+
+🕐 Часовой пояс: ${escapeMarkdown(timezone)}
+🏙️ Город: ${city ? escapeMarkdown(city) : 'Не указан'}`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '⬅️ Назад к настройкам приватности',
+                    callback_data: 'settings_privacy',
+                  },
+                ],
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
       } else {
         await this.showMainMenu(ctx);
       }
@@ -14120,26 +15602,19 @@ ${this.getItemActivationMessage(itemType)}`,
   }
 
   private async showTimezoneList(ctx: BotContext) {
+    // Минимальный список часовых поясов в формате МСК для СНГ
     const commonTimezones = [
-      { name: 'Москва', tz: 'Europe/Moscow' },
-      { name: 'СПб', tz: 'Europe/Moscow' },
-      { name: 'Екатеринбург', tz: 'Asia/Yekaterinburg' },
-      { name: 'Новосибирск', tz: 'Asia/Novosibirsk' },
-      { name: 'Владивосток', tz: 'Asia/Vladivostok' },
-      { name: 'Астана', tz: 'Asia/Almaty' },
-      { name: 'Киев', tz: 'Europe/Kiev' },
-      { name: 'Минск', tz: 'Europe/Minsk' },
-      { name: 'Лондон', tz: 'Europe/London' },
-      { name: 'Париж', tz: 'Europe/Paris' },
-      { name: 'Нью-Йорк', tz: 'America/New_York' },
-      { name: 'Лос-Анджелес', tz: 'America/Los_Angeles' },
+      { name: 'МСК (Московское время) (UTC+3)', tz: 'Europe/Moscow' },
+      { name: 'МСК+1 (Самара) (UTC+4)', tz: 'Europe/Samara' },
+      { name: 'МСК+2 (Екатеринбург, Урал) (UTC+5)', tz: 'Asia/Yekaterinburg' },
+      { name: 'МСК+4 (Владивосток, Дальний Восток) (UTC+7)', tz: 'Asia/Vladivostok' },
     ];
 
     await ctx.editMessageTextWithMarkdown(
       `
-🕐 *Выберите часовой пояс*
+🕐 *Выбери свой часовой пояс:*
 
-Выберите ближайший к вам город:`,
+Выбери вариант или введи свой город вручную:`,
       {
         reply_markup: {
           inline_keyboard: [
@@ -14187,8 +15662,9 @@ ${this.getItemActivationMessage(itemType)}`,
     }
 
     ctx.session.step = 'adding_habit';
-    await ctx.replyWithMarkdown(
-      '🔄 *Добавление привычки*\n\nn⬇️ *Выберите готовый пример или введите название привычки вручную:*',
+    await this.safeEditOrReply(
+      ctx,
+      '🔄 *Добавление привычки*\n\n⬇️ *Выберите готовый пример или введите название привычки вручную:*',
       {
         reply_markup: {
           inline_keyboard: [
@@ -16108,29 +17584,65 @@ ${this.getItemActivationMessage(itemType)}`,
 
   private async createHabitFromExample(ctx: BotContext, habitName: string) {
     try {
-      // Создаем привычку с выбранным названием
-      const habit = await this.habitService.createHabit({
+      // Показываем индикатор загрузки
+      await ctx.answerCbQuery('⏳ Создаю привычку...');
+
+      // Проверяем лимит ПЕРЕД созданием привычки
+      const habitLimitCheck = await this.subscriptionService.checkLimit(
+        ctx.userId,
+        'habits',
+      );
+
+      if (!habitLimitCheck.allowed) {
+        const limitMessage = this.subscriptionService.getLimitMessage(
+          'habits',
+          habitLimitCheck.current,
+          habitLimitCheck.limit,
+        );
+        await this.safeEditOrReply(
+          ctx,
+          limitMessage,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: '💎 Получить Premium',
+                    callback_data: 'get_premium',
+                  },
+                ],
+                [
+                  { text: '📊 Мои лимиты', callback_data: 'show_limits' },
+                  { text: '🏠 Главное меню', callback_data: 'back_to_menu' },
+                ],
+              ],
+            },
+          },
+        );
+        return;
+      }
+
+      // Выполняем операции параллельно для ускорения
+      const [habit, user] = await Promise.all([
+        this.habitService.createHabit({
         userId: ctx.userId,
         title: habitName,
         description: `каждый день`,
         frequency: 'DAILY',
         targetCount: 1,
-      });
+        }),
+        this.userService.findByTelegramId(ctx.userId),
+      ]);
 
-      // Increment usage counter for habits
-      await this.billingService.incrementUsage(ctx.userId, 'dailyHabits');
+      // Increment usage counter for habits (выполняем параллельно с получением usageInfo)
+      const [usageInfo] = await Promise.all([
+        this.subscriptionService.checkLimit(ctx.userId, 'habits'),
+        this.billingService.incrementUsage(ctx.userId, 'dailyHabits'),
+      ]);
 
       // Clear session state after successful habit creation
       ctx.session.step = undefined;
       ctx.session.pendingAction = undefined;
-
-      // Get current usage for display
-      const usageInfo = await this.billingService.checkUsageLimit(
-        ctx.userId,
-        'dailyHabits',
-      );
-
-      const user = await this.userService.findByTelegramId(ctx.userId);
 
       const keyboardForOnboarding = {
         reply_markup: {
@@ -16159,12 +17671,6 @@ ${this.getItemActivationMessage(itemType)}`,
                 callback_data: 'back_to_menu',
               },
             ],
-            [
-              {
-                text: '❓ Что еще я умею?',
-                callback_data: 'faq_support',
-              },
-            ],
           ],
         },
       };
@@ -16181,7 +17687,7 @@ ${this.getItemActivationMessage(itemType)}`,
 🎯 **Название:** ${habitName}
 📅 **Описание:** каждый день
 
-📊 **Использовано:** ${usageInfo.current}${usageInfo.limit === -1 ? '' : `/${usageInfo.limit}`} привычек
+📊 **Использовано:** ${usageInfo.current}${usageInfo.limit === -1 ? '/♾️' : `/${usageInfo.limit}`} привычек${usageInfo.limit !== -1 ? ` (осталось: ${usageInfo.remaining})` : ''}
 
 💡 **Подсказка:** Вы можете настроить напоминания для этой привычки в меню привычек.
         `,
@@ -16255,17 +17761,7 @@ ${this.getItemActivationMessage(itemType)}`,
       },
     };
 
-    // Check if this is a callback query (can edit) or command (need to reply)
-    if (ctx.callbackQuery) {
-      try {
-        await ctx.editMessageTextWithMarkdown(message, keyboard);
-      } catch (error) {
-        // Fallback for photo messages - reply instead of edit
-        await ctx.replyWithMarkdown(message, keyboard);
-      }
-    } else {
-      await ctx.replyWithMarkdown(message, keyboard);
-    }
+    await this.safeEditOrReply(ctx, message, keyboard);
   }
 
   private async showActivePomodoroSession(ctx: BotContext, session: any) {
@@ -16802,6 +18298,203 @@ ${this.getItemActivationMessage(itemType)}`,
   /**
    * Show main statistics
    */
+  private async showProgressMenu(ctx: BotContext) {
+    try {
+      const user = await this.getOrCreateUser(ctx);
+
+      // Get today's date in user's timezone
+      const today = new Date();
+      const userTimezone = user.timezone || 'Europe/Moscow';
+      const todayStr = today.toLocaleDateString('ru-RU', {
+        timeZone: userTimezone,
+      });
+
+      // Get current date bounds for today's statistics
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
+      const endOfToday = new Date();
+      endOfToday.setHours(23, 59, 59, 999);
+
+      // Get simplified statistics
+      const [
+        completedTasksCount,
+        totalTasksCount,
+        todayTasksCount,
+        todayHabitsCount,
+      ] = await Promise.all([
+        this.prisma.task.count({
+          where: {
+            userId: user.id,
+            status: 'COMPLETED',
+          },
+        }),
+        this.prisma.task.count({
+          where: {
+            userId: user.id,
+          },
+        }),
+        this.prisma.task.count({
+          where: {
+            userId: user.id,
+            completedAt: {
+              gte: startOfToday,
+              lte: endOfToday,
+            },
+          },
+        }),
+        this.prisma.habit.count({
+          where: {
+            userId: user.id,
+            updatedAt: {
+              gte: startOfToday,
+              lte: endOfToday,
+            },
+          },
+        }),
+      ]);
+
+      const totalXP = user.totalXp || 0;
+      const level = user.level || 1;
+
+      // Simplified progress message
+      let message = `📊 *Мой прогресс*\n\n`;
+      message += `⭐ **Опыт:** ${totalXP} XP | 🎖️ **Уровень:** ${level}\n\n`;
+      message += `📝 **Задачи:** ${completedTasksCount}/${totalTasksCount} выполнено\n`;
+      message += `🎯 **Сегодня:** ${todayTasksCount} задач, ${todayHabitsCount} привычек\n\n`;
+      message += `📅 ${todayStr}`;
+
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: '📈 Детальная статистика',
+                callback_data: 'progress_stats',
+              },
+            ],
+            [
+              {
+                text: '🏆 Достижения',
+                callback_data: 'achievements',
+              },
+            ],
+            [
+              {
+                text: '🏠 Главное меню',
+                callback_data: 'back_to_menu',
+              },
+            ],
+          ],
+        },
+      };
+
+      await this.safeEditOrReply(ctx, message, keyboard);
+    } catch (error) {
+      this.logger.error('Error showing progress menu:', error);
+      await ctx.replyWithMarkdown(
+        '❌ Произошла ошибка при загрузке прогресса. Попробуйте позже.',
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: '🏠 Главное меню',
+                  callback_data: 'back_to_menu',
+                },
+              ],
+            ],
+          },
+        },
+      );
+    }
+  }
+
+  private async showLimitsMenu(ctx: BotContext) {
+    try {
+      // Проверяем, является ли пользователь админом
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const isAdmin = adminIds.includes(ctx.userId);
+
+      if (isAdmin) {
+        await this.safeEditOrReply(
+          ctx,
+          `👑 *Администратор*\n\n♾️ Все функции без ограничений!\n🚀 Полный доступ ко всем возможностям бота!`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+        return;
+      }
+
+      const subscriptionStatus =
+        await this.billingService.getSubscriptionStatus(ctx.userId);
+
+      const limitsText =
+        subscriptionStatus.limits.dailyReminders === -1
+          ? '∞ (безлимит)'
+          : subscriptionStatus.limits.dailyReminders.toString();
+      const aiLimitsText =
+        subscriptionStatus.limits.dailyAiQueries === -1
+          ? '∞ (безлимит)'
+          : subscriptionStatus.limits.dailyAiQueries.toString();
+
+      let statusMessage = '';
+      if (subscriptionStatus.isTrialActive) {
+        statusMessage = `🎁 **Пробный период:** ${subscriptionStatus.daysRemaining} дней осталось`;
+      } else {
+        const isPremium = subscriptionStatus.type === 'PREMIUM';
+        if (subscriptionStatus.type !== 'FREE') {
+          // Получаем информацию о подписке для отображения дней
+          const user = await this.userService.findByTelegramId(ctx.userId);
+          if (user.subscriptionEnds) {
+            const now = new Date();
+            const daysRemaining = Math.max(
+              0,
+              Math.ceil(
+                (user.subscriptionEnds.getTime() - now.getTime()) /
+                  (1000 * 60 * 60 * 24),
+              ),
+            );
+            statusMessage = `💎 **Подписка:** ${
+              isPremium ? 'Premium' : 'Premium Plus'
+            } (осталось ${daysRemaining} ${daysRemaining === 1 ? 'день' : daysRemaining < 5 ? 'дня' : 'дней'})`;
+          } else {
+            statusMessage = `💎 **Подписка:** ${
+              isPremium ? 'Premium' : 'Premium Plus'
+            }`;
+          }
+        } else {
+          statusMessage = `💎 **Подписка:** Бесплатная`;
+        }
+      }
+
+      const message = `📊 *Ваши лимиты и использование*\n\n${statusMessage}\n\n**Текущее использование сегодня:**\n🔔 Напоминания: ${subscriptionStatus.usage.dailyReminders}/${limitsText}\n🧠 ИИ-запросы: ${subscriptionStatus.usage.dailyAiQueries}/${aiLimitsText}\n📝 Задачи: ${subscriptionStatus.usage.dailyTasks}${subscriptionStatus.limits.dailyTasks === -1 ? '' : `/${subscriptionStatus.limits.dailyTasks}`}\n🔄 Привычки: ${subscriptionStatus.usage.dailyHabits}${subscriptionStatus.limits.dailyHabits === -1 ? '' : `/${subscriptionStatus.limits.dailyHabits}`}`;
+
+      const keyboard = {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: subscriptionStatus.type === 'FREE' ? '💎 Обновиться до Premium' : '📊 Обновить',
+                callback_data: subscriptionStatus.type === 'FREE' ? 'upgrade_premium' : 'show_limits',
+              },
+            ],
+            [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+          ],
+        },
+      };
+
+      await this.safeEditOrReply(ctx, message, keyboard);
+    } catch (error) {
+      this.logger.error('Error showing limits menu:', error);
+      await ctx.replyWithMarkdown('❌ Ошибка при загрузке лимитов.');
+    }
+  }
+
   private async showMainStatistics(ctx: BotContext) {
     try {
       const user = await this.getOrCreateUser(ctx);
@@ -16892,14 +18585,18 @@ ${this.getItemActivationMessage(itemType)}`,
       const level = user.level || 1;
 
       // Calculate XP for current level (each level requires level * 100 XP)
-      let xpRequiredForCurrentLevel = (Math.pow((level-1), 2)) * 100;
-      const xpForNextLevel = Math.pow((level), 2) * 100; // XP needed to reach next level
+      let xpRequiredForCurrentLevel = 0;
+      for (let i = 1; i < level; i++) {
+        xpRequiredForCurrentLevel += i * 100;
+      }
+
+      const xpForNextLevel = level * 100; // XP needed to reach next level
       const currentLevelXP = Math.max(0, totalXP - xpRequiredForCurrentLevel); // XP progress within current level
-      const xpToNextLevel = Math.max(0, xpForNextLevel - xpRequiredForCurrentLevel);
-      
+      const xpToNextLevel = Math.max(0, xpForNextLevel - currentLevelXP);
+
       // Create progress bar
       const progressRatio =
-        xpForNextLevel > 0 ? currentLevelXP / xpToNextLevel : 0;
+        xpForNextLevel > 0 ? currentLevelXP / xpForNextLevel : 0;
       const progressBarLength = 10;
       const filledBars = Math.floor(progressRatio * progressBarLength);
       const emptyBars = progressBarLength - filledBars;
@@ -16914,8 +18611,8 @@ ${this.getItemActivationMessage(itemType)}`,
 
 🎯 **Прогресс уровня:**
 \`${progressBar}\` ${Math.round(progressRatio * 100)}%
-📈 ${totalXP}/${xpForNextLevel} XP до ${level + 1} уровня
-⏳ Осталось: ${xpToNextLevel - currentLevelXP} XP
+📈 ${currentLevelXP}/${xpForNextLevel} XP до ${level + 1} уровня
+⏳ Осталось: ${xpToNextLevel} XP
 
 📅 В системе с: ${user.createdAt.toLocaleDateString('ru-RU')}
 

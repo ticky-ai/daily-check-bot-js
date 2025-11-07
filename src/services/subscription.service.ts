@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 
 export interface FreePlanLimits {
@@ -34,7 +35,10 @@ export class SubscriptionService {
     dependencies: 1,
   };
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
+  ) {}
 
   async getSubscriptionInfo(userId: string): Promise<SubscriptionInfo> {
     try {
@@ -93,6 +97,20 @@ export class SubscriptionService {
     limit: number;
     remaining: number;
   }> {
+    // Проверяем, является ли пользователь админом
+    const adminIds = this.configService.get<string[]>('admin.ids') || [];
+    const isAdmin = adminIds.includes(userId);
+
+    // Админы имеют безлимитный доступ
+    if (isAdmin) {
+      return {
+        allowed: true,
+        current: 0,
+        limit: -1, // Неограничено для админов
+        remaining: -1,
+      };
+    }
+
     const subscriptionInfo = await this.getSubscriptionInfo(userId);
 
     if (subscriptionInfo.isPremium) {
@@ -121,6 +139,15 @@ export class SubscriptionService {
     type: keyof FreePlanLimits,
   ): Promise<void> {
     try {
+      // Проверяем, является ли пользователь админом
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const isAdmin = adminIds.includes(userId);
+
+      // Админы не увеличивают счетчики
+      if (isAdmin) {
+        return;
+      }
+
       const subscriptionInfo = await this.getSubscriptionInfo(userId);
 
       if (subscriptionInfo.isPremium) {
@@ -228,6 +255,24 @@ export class SubscriptionService {
 
   async showSubscriptionStatus(ctx: any): Promise<void> {
     try {
+      // Проверяем, является ли пользователь админом
+      const adminIds = this.configService.get<string[]>('admin.ids') || [];
+      const isAdmin = adminIds.includes(ctx.userId);
+
+      if (isAdmin) {
+        await ctx.replyWithMarkdown(
+          `👑 **Администратор**\n\n♾️ Все функции без ограничений!\n🚀 Полный доступ ко всем возможностям бота!`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🏠 Главное меню', callback_data: 'back_to_menu' }],
+              ],
+            },
+          },
+        );
+        return;
+      }
+
       const info = await this.getSubscriptionInfo(ctx.userId);
 
       let message = info.isPremium

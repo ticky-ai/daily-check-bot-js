@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service';
 import { SubscriptionType } from '@prisma/client';
 
@@ -15,7 +16,10 @@ export interface UsageLimits {
 
 @Injectable()
 export class BillingService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private configService: ConfigService,
+  ) {}
 
   private readonly SUBSCRIPTION_LIMITS: Record<SubscriptionType, UsageLimits> =
     {
@@ -42,6 +46,15 @@ export class BillingService {
     };
 
   async getUserLimits(userId: string): Promise<UsageLimits> {
+    // Проверяем, является ли пользователь админом
+    const adminIds = this.configService.get<string[]>('admin.ids') || [];
+    const isAdmin = adminIds.includes(userId);
+
+    // Админы имеют безлимитный доступ
+    if (isAdmin) {
+      return this.SUBSCRIPTION_LIMITS.PREMIUM;
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: {
@@ -77,6 +90,15 @@ export class BillingService {
     limit: number;
     message?: string;
   }> {
+    // Проверяем, является ли пользователь админом
+    const adminIds = this.configService.get<string[]>('admin.ids') || [];
+    const isAdmin = adminIds.includes(userId);
+
+    // Админы имеют безлимитный доступ
+    if (isAdmin) {
+      return { allowed: true, current: 0, limit: -1 };
+    }
+
     const limits = await this.getUserLimits(userId);
     const limit = limits[limitType] as number;
 
@@ -145,6 +167,15 @@ export class BillingService {
     userId: string,
     limitType: keyof UsageLimits,
   ): Promise<void> {
+    // Проверяем, является ли пользователь админом
+    const adminIds = this.configService.get<string[]>('admin.ids') || [];
+    const isAdmin = adminIds.includes(userId);
+
+    // Админы не увеличивают счетчики
+    if (isAdmin) {
+      return;
+    }
+
     await this.resetDailyUsageIfNeeded(userId);
 
     const updateData: any = {};
@@ -161,6 +192,37 @@ export class BillingService {
         break;
       case 'dailyAiQueries':
         updateData.dailyAiQueriesUsed = { increment: 1 };
+        break;
+    }
+
+    if (Object.keys(updateData).length > 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: updateData,
+      });
+    }
+  }
+
+  async decrementUsage(
+    userId: string,
+    limitType: keyof UsageLimits,
+  ): Promise<void> {
+    await this.resetDailyUsageIfNeeded(userId);
+
+    const updateData: any = {};
+
+    switch (limitType) {
+      case 'dailyReminders':
+        updateData.dailyRemindersUsed = { decrement: 1 };
+        break;
+      case 'dailyTasks':
+        updateData.dailyTasksUsed = { decrement: 1 };
+        break;
+      case 'dailyHabits':
+        updateData.dailyHabitsUsed = { decrement: 1 };
+        break;
+      case 'dailyAiQueries':
+        updateData.dailyAiQueriesUsed = { decrement: 1 };
         break;
     }
 
